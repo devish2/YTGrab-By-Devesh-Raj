@@ -583,6 +583,10 @@ export default function App() {
   const [videos, setVideos] = useState([]);
   const [singleVideo, setSingleVideo] = useState(null);
   const [error, setError] = useState("");
+  const [botCheckActive, setBotCheckActive] = useState(false);
+  const [cookieText, setCookieText] = useState("");
+  const [cookieSaving, setCookieSaving] = useState(false);
+  const [cookieSessionReady, setCookieSessionReady] = useState(false);
   const [downloadTrigger, setDownloadTrigger] = useState(0);
   const [downloadStarted, setDownloadStarted] = useState(false);
   const [saveFileHandle, setSaveFileHandle] = useState(null);
@@ -595,19 +599,25 @@ export default function App() {
     const ytPattern = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+/;
     if (!ytPattern.test(trimmed)) { setError("Please enter a valid YouTube URL."); return; }
     setError(""); setLoading(true); setMode(null); setSingleVideo(null); setVideos([]);
+    setBotCheckActive(false);
     setDownloadStarted(false);
     setSaveFileHandle(null);
 
     try {
       const r = await apiFetch(`/api/info?url=${encodeURIComponent(trimmed)}`);
+      let data = null;
+      try {
+        data = await r.json();
+      } catch {
+        data = null;
+      }
 
-if (!r.ok) {
-  const text = await r.text();
-  throw new Error(text || `Request failed with ${r.status}`);
-}
+      if (!r.ok) {
+        throw new Error(data?.error || `Request failed with ${r.status}`);
+      }
 
-const data = await r.json();
-if (data.error) throw new Error(data.error);      if (data.isPlaylist) {
+      if (data?.error) throw new Error(data.error);
+      if (data.isPlaylist) {
         setVideos(data.videos);
         setCheckedVideos(data.videos.map(v => v.id));
         setMode("playlist");
@@ -619,11 +629,55 @@ if (data.error) throw new Error(data.error);      if (data.isPlaylist) {
       const msg = String(e?.message || e);
       const looksLikeBotCheck =
         /Sign in to confirm you(?:'|’)re not a bot/i.test(msg) ||
-        /Use --cookies-from-browser or --cookies/i.test(msg);
-      if (looksLikeBotCheck) setError("YouTube blocked this request (bot-check). Please open YouTube in your browser once (logged-in), then retry.");
+        /Use --cookies-from-browser or --cookies/i.test(msg) ||
+        /BOT_CHECK/i.test(msg);
+      if (looksLikeBotCheck) {
+        setBotCheckActive(true);
+        setError("YouTube blocked this request. Paste a valid YouTube cookies.txt export below, then retry.");
+      }
       else setError("Failed to fetch video info: " + msg);
     }
     setLoading(false);
+  }
+
+  async function handleSaveCookies() {
+    const trimmedCookies = cookieText.trim();
+    if (!trimmedCookies) {
+      setError("Paste the contents of a valid cookies.txt file first.");
+      setBotCheckActive(true);
+      return;
+    }
+
+    setCookieSaving(true);
+    setError("");
+    try {
+      const r = await apiFetch("/api/cookies", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cookies: trimmedCookies }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data?.error || `Request failed with ${r.status}`);
+      setCookieSessionReady(true);
+      setBotCheckActive(false);
+      setError("");
+      await handleAnalyze();
+    } catch (e) {
+      setBotCheckActive(true);
+      setCookieSessionReady(false);
+      setError(String(e?.message || e));
+    } finally {
+      setCookieSaving(false);
+    }
+  }
+
+  async function handleClearCookies() {
+    try {
+      await apiFetch("/api/cookies", { method: "DELETE" });
+    } catch {}
+    setCookieText("");
+    setCookieSessionReady(false);
+    setBotCheckActive(false);
   }
 
   const videoFormats = FORMATS.filter(f => f.type === "video");
@@ -677,7 +731,7 @@ if (data.error) throw new Error(data.error);      if (data.isPlaylist) {
           </label>
           <div style={{ display: "flex", gap: 10 }}>
             <input type="text" value={url}
-              onChange={e => { setUrl(e.target.value); setError(""); setMode(null); }}
+              onChange={e => { setUrl(e.target.value); setError(""); setMode(null); setBotCheckActive(false); }}
               placeholder="https://youtube.com/watch?v=... or playlist URL"
               style={{
                 flex: 1, background: "#0a0f1a", border: "1px solid #1f2937",
@@ -696,6 +750,95 @@ if (data.error) throw new Error(data.error);      if (data.isPlaylist) {
                 <div style={{ height: "100%", width: "50%", background: "linear-gradient(90deg,#3b82f6,#8b5cf6)", animation: "slide 1.2s infinite ease-in-out", borderRadius: 4 }} />
               </div>
               <div style={{ fontSize: 11, color: "#6b7280", marginTop: 6 }}>Fetching video metadata via yt-dlp…</div>
+            </div>
+          )}
+          {(botCheckActive || cookieSessionReady) && (
+            <div style={{
+              marginTop: 14,
+              padding: 14,
+              borderRadius: 10,
+              border: `1px solid ${cookieSessionReady ? "#065f46" : "#7f1d1d"}`,
+              background: cookieSessionReady ? "#052e16" : "#1f1720",
+            }}>
+              <div style={{
+                fontSize: 12,
+                fontWeight: 700,
+                color: cookieSessionReady ? "#6ee7b7" : "#fca5a5",
+                marginBottom: 6,
+              }}>
+                {cookieSessionReady ? "YouTube cookie session active" : "YouTube verification required"}
+              </div>
+              <div style={{ fontSize: 11, color: "#cbd5e1", lineHeight: 1.5, marginBottom: 10 }}>
+                {cookieSessionReady
+                  ? "This browser session will be reused for metadata and download requests for the next 12 hours, or until you clear it."
+                  : "Export a Netscape-format cookies.txt from a logged-in YouTube session, paste it here, and analyze again."}
+              </div>
+              {!cookieSessionReady && (
+                <textarea
+                  value={cookieText}
+                  onChange={e => setCookieText(e.target.value)}
+                  placeholder={"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t...\tSID\t..."}
+                  style={{
+                    width: "100%",
+                    minHeight: 130,
+                    resize: "vertical",
+                    background: "#0a0f1a",
+                    color: "#f9fafb",
+                    border: "1px solid #374151",
+                    borderRadius: 8,
+                    padding: 12,
+                    fontSize: 12,
+                    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                    marginBottom: 10,
+                  }}
+                />
+              )}
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {!cookieSessionReady && (
+                  <button
+                    onClick={handleSaveCookies}
+                    disabled={cookieSaving || loading}
+                    className="analyze-btn"
+                    style={{
+                      padding: "10px 16px",
+                      background: cookieSaving ? "#1f2937" : "linear-gradient(135deg,#2563eb,#7c3aed)",
+                      color: cookieSaving ? "#6b7280" : "#fff",
+                    }}
+                  >
+                    {cookieSaving ? "Saving…" : "Save cookies and retry"}
+                  </button>
+                )}
+                {cookieSessionReady && (
+                  <button
+                    onClick={handleAnalyze}
+                    disabled={loading}
+                    className="analyze-btn"
+                    style={{
+                      padding: "10px 16px",
+                      background: loading ? "#1f2937" : "linear-gradient(135deg,#2563eb,#7c3aed)",
+                      color: loading ? "#6b7280" : "#fff",
+                    }}
+                  >
+                    {loading ? "Analyzing…" : "Retry analyze"}
+                  </button>
+                )}
+                <button
+                  onClick={handleClearCookies}
+                  disabled={cookieSaving || loading}
+                  style={{
+                    padding: "10px 14px",
+                    borderRadius: 8,
+                    border: "1px solid #374151",
+                    background: "transparent",
+                    color: "#cbd5e1",
+                    cursor: "pointer",
+                    fontSize: 12,
+                    fontWeight: 600,
+                  }}
+                >
+                  {cookieSessionReady ? "Clear cookie session" : "Dismiss"}
+                </button>
+              </div>
             </div>
           )}
         </div>

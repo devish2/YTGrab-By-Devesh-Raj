@@ -13,9 +13,11 @@ const PORT = process.env.PORT || 5000;
 // backend's local `downloads/` folder.
 const DOWNLOADS_DIR = process.env.USER_WORK_DIR || path.join(os.tmpdir(), "ytgrab-downloads");
 const USER_DOWNLOADS_DIR = process.env.USER_DOWNLOADS_DIR || path.join(os.homedir(), "Downloads");
+const COOKIES_DIR = path.join(DOWNLOADS_DIR, "cookies");
 
 // Ensure downloads (work) directory exists
 if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
+if (!fs.existsSync(COOKIES_DIR)) fs.mkdirSync(COOKIES_DIR, { recursive: true });
 try { if (!fs.existsSync(USER_DOWNLOADS_DIR)) fs.mkdirSync(USER_DOWNLOADS_DIR, { recursive: true }); } catch {}
 
 const allowedOrigins = [
@@ -127,10 +129,36 @@ const jobs = {};
 
 // ─── In-memory playlist job store ─────────────────────────────────────────
 const playlistJobs = {}; // playlistJobId -> { id, jobIds, status, progress, zipFilename, error, createdAt }
+let activeCookieSession = null; // { id, filePath, createdAt }
 
 // ─── Helper: run yt-dlp and return a promise ────────────────────────────────
 
+function getActiveCookieFilePath() {
+  if (!activeCookieSession?.filePath) return null;
+  if (!fs.existsSync(activeCookieSession.filePath)) {
+    activeCookieSession = null;
+    return null;
+  }
+  return activeCookieSession.filePath;
+}
+
+function deleteCookieSession() {
+  const filePath = activeCookieSession?.filePath;
+  activeCookieSession = null;
+  if (!filePath) return;
+
+  try {
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  } catch (e) {
+    console.warn("Failed to delete cookie session:", e?.message || e);
+  }
+}
+
 function buildYtDlpArgs(baseArgs) {
+  const cookieFile = getActiveCookieFilePath();
+  if (cookieFile) {
+    return ["--cookies", cookieFile, ...baseArgs];
+  }
   if (process.env.NODE_ENV === "production") {
     return baseArgs;
   }
@@ -175,6 +203,19 @@ function withBrowserCookies(args, browser) {
   return ["--cookies-from-browser", browser, ...args];
 }
 
+async function runYtDlpForMetadata(baseArgs) {
+  const cookieFile = getActiveCookieFilePath();
+  if (cookieFile) {
+    return runYtDlp(["--cookies", cookieFile, ...baseArgs]);
+  }
+
+  if (process.env.NODE_ENV === "production") {
+    return runYtDlp(baseArgs);
+  }
+
+  return runYtDlpWithBrowserFallback(baseArgs);
+}
+
 async function runYtDlpWithBrowserFallback(baseArgs) {
   const browsers = preferredBrowsers();
   let lastErr = null;
@@ -210,10 +251,7 @@ app.get("/api/info", async (req, res) => {
       url,
     ];
 
-    const raw =
-      process.env.NODE_ENV === "production"
-        ? await runYtDlp(baseArgs)
-        : await runYtDlpWithBrowserFallback(baseArgs);
+    const raw = await runYtDlpForMetadata(baseArgs);
 
     const lines = raw.split("\n").filter(Boolean);
 
@@ -249,6 +287,44 @@ app.get("/api/info", async (req, res) => {
       error: msg,
     });
   }
+});
+
+// ─── POST /api/cookies ─────────────────────────────────────────────────────
+// Body: { cookies: string }
+// Stores a temporary Netscape-format cookies.txt for bot-check recovery.
+app.post("/api/cookies", async (req, res) => {
+  const cookies = String(req.body?.cookies || "").trim();
+  if (!cookies) return res.status(400).json({ error: "cookies text is required" });
+  if (!/\tyoutube\.com\t|\t\.youtube\.com\t|\tgoogle\.com\t|\t\.google\.com\t/i.test(cookies)) {
+    return res.status(400).json({ error: "cookies.txt must include YouTube or Google cookie rows" });
+  }
+
+  const nextId = uuidv4();
+  const filePath = path.join(COOKIES_DIR, `${nextId}.txt`);
+
+  try {
+    await fs.promises.writeFile(filePath, `${cookies}\n`, "utf8");
+    deleteCookieSession();
+    activeCookieSession = {
+      id: nextId,
+      filePath,
+      createdAt: Date.now(),
+    };
+
+    res.json({
+      ok: true,
+      cookieSessionId: nextId,
+      expiresInHours: 12,
+    });
+  } catch (e) {
+    res.status(500).json({ error: `Failed to store cookies: ${String(e?.message || e)}` });
+  }
+});
+
+// ─── DELETE /api/cookies ───────────────────────────────────────────────────
+app.delete("/api/cookies", (_req, res) => {
+  deleteCookieSession();
+  res.json({ ok: true });
 });
 
 // ─── POST /api/download ─────────────────────────────────────────────────────
@@ -709,6 +785,20 @@ setInterval(() => {
   } catch {}
 
   // Clean up cookie files (best-effort).
+  try {
+    const activeCookieFile = getActiveCookieFilePath();
+    if (activeCookieSession?.createdAt && activeCookieSession.createdAt < cookiesCutoff) {
+      deleteCookieSession();
+    }
+
+    const files = fs.readdirSync(COOKIES_DIR);
+    files.forEach(f => {
+      const full = path.join(COOKIES_DIR, f);
+      if (activeCookieFile && full === activeCookieFile) return;
+      const stat = fs.statSync(full);
+      if (stat.mtimeMs < cookiesCutoff) fs.unlinkSync(full);
+    });
+  } catch {}
 }, 10 * 60 * 1000);
 
 // ─── Health check ───────────────────────────────────────────────────────────
