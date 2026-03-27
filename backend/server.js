@@ -192,12 +192,11 @@ app.get("/api/info", async (req, res) => {
   if (!url) return res.status(400).json({ error: "url is required" });
 
   try {
-    const raw = await runYtDlpWithBrowserFallback([
-      "--dump-json",
-      "--flat-playlist",
-      "--no-warnings",
-      url,
-    ]);
+    const raw =
+  process.env.NODE_ENV === "production"
+    ? await runYtDlp(baseArgs)   // ✅ NO cookies
+    : await runYtDlpWithBrowserFallback(baseArgs);
+    
 
     // yt-dlp outputs one JSON object per line for playlists
     const lines = raw.split("\n").filter(Boolean);
