@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
-const API_BASE = 'https://ytgrab-by-devesh-raj.onrender.com';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
 
 async function apiFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, options);
