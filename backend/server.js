@@ -216,37 +216,37 @@ app.get("/api/info", async (req, res) => {
         : await runYtDlpWithBrowserFallback(baseArgs);
 
     const lines = raw.split("\n").filter(Boolean);
-    const videos = lines.map(line => {
-      try {
-        const v = JSON.parse(line);
-        return {
-          id: v.id,
-          title: v.title || v.fulltitle || "Unknown",
-          channel: v.uploader || v.channel || "Unknown",
-          duration: formatDuration(v.duration),
-          views: formatViews(v.view_count),
-          thumb: v.thumbnail || `https://i.ytimg.com/vi/${v.id}/hqdefault.jpg`,
-          url: v.webpage_url || `https://www.youtube.com/watch?v=${v.id}`,
-        };
-      } catch {
-        return null;
-      }
-    }).filter(Boolean);
 
-    res.json({
+    const videos = lines
+      .map((line) => {
+        try {
+          const v = JSON.parse(line);
+          return {
+            id: v.id,
+            title: v.title || v.fulltitle || "Unknown",
+            channel: v.uploader || v.channel || "Unknown",
+            duration: formatDuration(v.duration),
+            views: formatViews(v.view_count),
+            thumb:
+              v.thumbnail || `https://i.ytimg.com/vi/${v.id}/hqdefault.jpg`,
+            url: v.webpage_url || `https://www.youtube.com/watch?v=${v.id}`,
+          };
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+
+    return res.json({
       isPlaylist: videos.length > 1,
       videos,
     });
   } catch (err) {
     const msg = String(err?.message || err || "");
     console.error("Info error:", msg);
-    const isBotCheck =
-      /Sign in to confirm you(?:'|’)re not a bot/i.test(msg) ||
-      /Use --cookies-from-browser or --cookies/i.test(msg);
 
-    res.status(500).json({
+    return res.status(500).json({
       error: msg,
-      code: isBotCheck ? "BOT_CHECK" : undefined,
     });
   }
 });
@@ -418,12 +418,63 @@ app.post("/api/download-playlist", (req, res) => {
   const fmtConfig = FORMAT_MAP[formatId];
   if (!fmtConfig) return res.status(400).json({ error: "Invalid formatId" });
 
-  const jobIds = [];
-
-  urls.forEach((url, index) => {
+  const jobIds = urls.map((url, index) => {
     const jobId = uuidv4();
     const outputTemplate = path.join(DOWNLOADS_DIR, `${jobId}_%(title)s.%(ext)s`);
+    const args = buildYtDlpArgs([
+      "--no-playlist",
+      "--merge-output-format", fmtConfig.ext,
+      "-o", outputTemplate,
+      "--newline",
+    ]);
 
+    if (fmtConfig.audioOnly) {
+      args.push("-x", "--audio-format", fmtConfig.ext);
+      if (fmtConfig.audioBitrate) args.push("--audio-quality", `${fmtConfig.audioBitrate}K`);
+    } else {
+      args.push("-f", fmtConfig.format);
+    }
+    args.push(url);
+
+    const job = {
+      id: jobId,
+      url,
+      formatId,
+      kind: "playlistZip",
+      status: "pending",
+      progress: 0,
+      speed: "",
+      eta: "",
+      filename: null,
+      error: null,
+      createdAt: Date.now(),
+    };
+    jobs[jobId] = job;
+
+    // Stagger starts slightly to avoid hammering.
+    setTimeout(() => startDownload(job, args), index * 500);
+    return jobId;
+  });
+
+  res.json({ jobIds });
+});
+
+// ─── POST /api/download-playlist-zip ─────────────────────────────────────────
+// Creates individual jobs for each URL, waits until all are done, then zips them
+// into a single archive for direct download.
+// Body: { urls: string[], formatId }
+// Returns: { playlistJobId, jobIds }
+app.post("/api/download-playlist-zip", (req, res) => {
+  const { urls, formatId } = req.body;
+  if (!Array.isArray(urls) || urls.length === 0) return res.status(400).json({ error: "urls array required" });
+
+  const fmtConfig = FORMAT_MAP[formatId];
+  if (!fmtConfig) return res.status(400).json({ error: "Invalid formatId" });
+
+  const playlistJobId = uuidv4();
+  const jobIds = urls.map((url, index) => {
+    const jobId = uuidv4();
+    const outputTemplate = path.join(DOWNLOADS_DIR, `${jobId}_%(title)s.%(ext)s`);
     const args = buildYtDlpArgs([
       "--no-playlist",
       "--merge-output-format", fmtConfig.ext,
@@ -444,60 +495,7 @@ app.post("/api/download-playlist", (req, res) => {
       id: jobId,
       url,
       formatId,
-      kind: "single",
-      status: "pending",
-      progress: 0,
-      speed: "",
-      eta: "",
-      filename: null,
-      error: null,
-      createdAt: Date.now(),
-    };
-
-    jobs[jobId] = job;
-    jobIds.push(jobId);
-
-    // Stagger starts slightly to avoid hammering
-    setTimeout(() => startDownload(job, args), index * 500);
-  });
-
-  res.json({ jobIds });
-});
-
-// ─── POST /api/download-playlist-zip ─────────────────────────────────────────
-// Creates individual jobs for each URL, waits until all are done, then zips them
-// into a single archive for direct download.
-// Body: { urls: string[], formatId }
-// Returns: { playlistJobId, jobIds }
-app.post("/api/download-playlist-zip", (req, res) => {
-  const { urls, formatId } = req.body;
-  if (!Array.isArray(urls) || urls.length === 0) return res.status(400).json({ error: "urls array required" });
-
-  const fmtConfig = FORMAT_MAP[formatId];
-  if (!fmtConfig) return res.status(400).json({ error: "Invalid formatId" });
-
-  const playlistJobId = uuidv4();
-  const args = buildYtDlpArgs([
-  "--no-playlist",
-  "--merge-output-format", fmtConfig.ext,
-  "-o", outputTemplate,
-  "--newline",
-]);
-
-    if (fmtConfig.audioOnly) {
-      args.push("-x", "--audio-format", fmtConfig.ext);
-      if (fmtConfig.audioBitrate) args.push("--audio-quality", `${fmtConfig.audioBitrate}K`);
-    } else {
-      args.push("-f", fmtConfig.format);
-    }
-
-    args.push(url);
-
-    const job = {
-      id: jobId,
-      url,
-      formatId,
-      kind: "playlistZip", // used to decide whether to copy per-item output to OS Downloads
+      kind: "playlistZip",
       status: "pending",
       progress: 0,
       speed: "",
@@ -509,7 +507,7 @@ app.post("/api/download-playlist-zip", (req, res) => {
 
     jobs[jobId] = job;
 
-    // Stagger starts slightly to avoid hammering
+    // Stagger starts slightly to avoid hammering.
     setTimeout(() => startDownload(job, args), index * 500);
     return jobId;
   });

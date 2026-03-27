@@ -163,16 +163,28 @@ function VideoCard({ video, checked, onToggle, formatId, fmtLabel }) {
   }
 
   useJobPoller(jobId, setJobData, (d) => {
-    if (d.status === "done") {
+      if (d.status === "done") {
       const handle = fileHandleRef.current;
       if (handle) {
         fileHandleRef.current = null;
         (async () => {
           try {
-            )();
+            showToast("Saving file", "Choose location has been selected. Writing to disk…");
+            const bytes = await streamToFileHandle(`${API_BASE}/api/job/${jobId}/file`, handle);
+            if (bytes === 0 && typeof handle.remove === "function") {
+              await handle.remove();
+            }
+            showToast("Downloaded", "Saved to your chosen location.");
+          } catch (e) {
+            if (typeof handle.remove === "function") {
+              try { await handle.remove(); } catch {}
+            }
+            showToast("Download failed", String(e?.message || e));
+          }
+        })();
       } else {
         // Fallback: normal browser download to default Downloads folder.
-        window.location.href = `${API_BASE}/job/${jobId}/file`;
+        window.location.href = `${API_BASE}/api/job/${jobId}/file`;
       }
     }
   });
@@ -424,7 +436,7 @@ function PlaylistDownloader({ videos, checkedIds, formatId, fmtLabel, trigger, s
         const data = await r.json();
         if (data.status === "done" && data.downloadUrl) {
           const handle = saveFileHandleRef.current;
-          const zipUrl = `${API_BASE}/playlist-job/${playlistJobId}/file`;
+          const zipUrl = `${API_BASE}/api/playlist-job/${playlistJobId}/file`;
 
           if (handle) {
             saveFileHandleRef.current = null;
