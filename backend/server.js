@@ -26,6 +26,7 @@ const allowedOrigins = [
   process.env.FRONTEND_URL,
 ].filter(Boolean);
 
+
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin || allowedOrigins.includes(origin)) {
@@ -38,6 +39,7 @@ app.use(cors({
 }));
 
 app.use(express.json());
+
 
 app.use("/downloads", express.static(DOWNLOADS_DIR));
 
@@ -127,6 +129,15 @@ const jobs = {};
 const playlistJobs = {}; // playlistJobId -> { id, jobIds, status, progress, zipFilename, error, createdAt }
 
 // ─── Helper: run yt-dlp and return a promise ────────────────────────────────
+
+function buildYtDlpArgs(baseArgs) {
+  if (process.env.NODE_ENV === "production") {
+    return baseArgs;
+  }
+  const browser = preferredBrowsers()[0];
+  return withBrowserCookies(baseArgs, browser);
+}
+
 function runYtDlp(args) {
   return new Promise((resolve, reject) => {
     const proc = spawn("yt-dlp", args);
@@ -192,13 +203,18 @@ app.get("/api/info", async (req, res) => {
   if (!url) return res.status(400).json({ error: "url is required" });
 
   try {
-    const raw =
-  process.env.NODE_ENV === "production"
-    ? await runYtDlp(baseArgs)   // ✅ NO cookies
-    : await runYtDlpWithBrowserFallback(baseArgs);
-    
+    const baseArgs = [
+      "--dump-json",
+      "--flat-playlist",
+      "--no-warnings",
+      url,
+    ];
 
-    // yt-dlp outputs one JSON object per line for playlists
+    const raw =
+      process.env.NODE_ENV === "production"
+        ? await runYtDlp(baseArgs)
+        : await runYtDlpWithBrowserFallback(baseArgs);
+
     const lines = raw.split("\n").filter(Boolean);
     const videos = lines.map(line => {
       try {
@@ -212,16 +228,26 @@ app.get("/api/info", async (req, res) => {
           thumb: v.thumbnail || `https://i.ytimg.com/vi/${v.id}/hqdefault.jpg`,
           url: v.webpage_url || `https://www.youtube.com/watch?v=${v.id}`,
         };
-      } catch { return null; }
+      } catch {
+        return null;
+      }
     }).filter(Boolean);
 
-    const isPlaylist = videos.length > 1;
-    res.json({ isPlaylist, videos });
+    res.json({
+      isPlaylist: videos.length > 1,
+      videos,
+    });
   } catch (err) {
     const msg = String(err?.message || err || "");
     console.error("Info error:", msg);
-    const isBotCheck = /Sign in to confirm you(?:'|’)re not a bot/i.test(msg) || /Use --cookies-from-browser or --cookies/i.test(msg);
-    res.status(500).json({ error: msg, code: isBotCheck ? "BOT_CHECK" : undefined });
+    const isBotCheck =
+      /Sign in to confirm you(?:'|’)re not a bot/i.test(msg) ||
+      /Use --cookies-from-browser or --cookies/i.test(msg);
+
+    res.status(500).json({
+      error: msg,
+      code: isBotCheck ? "BOT_CHECK" : undefined,
+    });
   }
 });
 
@@ -239,13 +265,12 @@ app.post("/api/download", (req, res) => {
   const outputTemplate = path.join(DOWNLOADS_DIR, `${jobId}_%(title)s.%(ext)s`);
 
   // Build yt-dlp args
-  const browser = preferredBrowsers()[0];
-  const args = withBrowserCookies([
-    "--no-playlist",
-    "--merge-output-format", fmtConfig.ext,
-    "-o", outputTemplate,
-    "--newline",  // progress on each line
-  ], browser);
+  const args = buildYtDlpArgs([
+  "--no-playlist",
+  "--merge-output-format", fmtConfig.ext,
+  "-o", outputTemplate,
+  "--newline",
+]);
 
   if (fmtConfig.audioOnly) {
     args.push("-x", "--audio-format", fmtConfig.ext);
@@ -393,35 +418,47 @@ app.post("/api/download-playlist", (req, res) => {
   const fmtConfig = FORMAT_MAP[formatId];
   if (!fmtConfig) return res.status(400).json({ error: "Invalid formatId" });
 
-  const browser = preferredBrowsers()[0];
-  const jobIds = urls.map((url, index) => {
+  const jobIds = [];
+
+  urls.forEach((url, index) => {
     const jobId = uuidv4();
     const outputTemplate = path.join(DOWNLOADS_DIR, `${jobId}_%(title)s.%(ext)s`);
-    const args = withBrowserCookies([
+
+    const args = buildYtDlpArgs([
       "--no-playlist",
       "--merge-output-format", fmtConfig.ext,
       "-o", outputTemplate,
       "--newline",
-    ], browser);
+    ]);
+
     if (fmtConfig.audioOnly) {
       args.push("-x", "--audio-format", fmtConfig.ext);
       if (fmtConfig.audioBitrate) args.push("--audio-quality", `${fmtConfig.audioBitrate}K`);
     } else {
       args.push("-f", fmtConfig.format);
     }
+
     args.push(url);
 
     const job = {
-      id: jobId, url, formatId,
-      kind: "playlistZip", // keep consistent with playlist ZIP behavior
-      status: "pending", progress: 0, speed: "", eta: "",
-      filename: null, error: null, createdAt: Date.now(),
+      id: jobId,
+      url,
+      formatId,
+      kind: "single",
+      status: "pending",
+      progress: 0,
+      speed: "",
+      eta: "",
+      filename: null,
+      error: null,
+      createdAt: Date.now(),
     };
+
     jobs[jobId] = job;
+    jobIds.push(jobId);
 
     // Stagger starts slightly to avoid hammering
     setTimeout(() => startDownload(job, args), index * 500);
-    return jobId;
   });
 
   res.json({ jobIds });
@@ -440,16 +477,12 @@ app.post("/api/download-playlist-zip", (req, res) => {
   if (!fmtConfig) return res.status(400).json({ error: "Invalid formatId" });
 
   const playlistJobId = uuidv4();
-  const browser = preferredBrowsers()[0];
-  const jobIds = urls.map((url, index) => {
-    const jobId = uuidv4();
-    const outputTemplate = path.join(DOWNLOADS_DIR, `${jobId}_%(title)s.%(ext)s`);
-    const args = withBrowserCookies([
-      "--no-playlist",
-      "--merge-output-format", fmtConfig.ext,
-      "-o", outputTemplate,
-      "--newline",
-    ], browser);
+  const args = buildYtDlpArgs([
+  "--no-playlist",
+  "--merge-output-format", fmtConfig.ext,
+  "-o", outputTemplate,
+  "--newline",
+]);
 
     if (fmtConfig.audioOnly) {
       args.push("-x", "--audio-format", fmtConfig.ext);

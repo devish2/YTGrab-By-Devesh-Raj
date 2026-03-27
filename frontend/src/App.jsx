@@ -169,12 +169,7 @@ function VideoCard({ video, checked, onToggle, formatId, fmtLabel }) {
         fileHandleRef.current = null;
         (async () => {
           try {
-            await streamToFileHandle(`${API_BASE}/job/${jobId}/file`, handle);
-            showToast("Downloaded", "Saved to your selected folder.");
-          } catch (e) {
-            showToast("Download failed", String(e?.message || e));
-          }
-        })();
+            )();
       } else {
         // Fallback: normal browser download to default Downloads folder.
         window.location.href = `${API_BASE}/job/${jobId}/file`;
@@ -364,7 +359,7 @@ function PlaylistDownloader({ videos, checkedIds, formatId, fmtLabel, trigger, s
                   (async () => {
                     try {
                       showToast("Saving file", "Choose location has been selected. Writing to disk…");
-                      const bytes = await streamToFileHandle(`${API_BASE}/job/${jobId}/file`, handle);
+                      const bytes = await streamToFileHandle(`${API_BASE}/api/job/${jobId}/file`, handle);
                       if (bytes === 0 && typeof handle.remove === "function") {
                         await handle.remove();
                       }
@@ -379,7 +374,7 @@ function PlaylistDownloader({ videos, checkedIds, formatId, fmtLabel, trigger, s
                     }
                   })();
                 } else {
-                  window.location.href = `${API_BASE}/job/${jobId}/file`;
+                  window.location.href = `${API_BASE}/api/job/${jobId}/file`;
                   showToast("Download started", "Saved to your system Downloads.");
                 }
               }

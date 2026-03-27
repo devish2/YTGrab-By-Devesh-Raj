@@ -11,7 +11,6 @@ ytgrab/
 ├── backend/
 │   ├── server.js          ← Express API server
 │   ├── package.json
-│   └── downloads/         ← auto-created, stores downloaded files
 └── frontend/
     ├── src/
     │   └── App.jsx        ← React frontend
