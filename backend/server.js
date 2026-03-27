@@ -1,113 +1,184 @@
 const express = require("express");
 const cors = require("cors");
-const { spawn } = require("child_process");
+const { spawn, execSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
-const os = require("os");
 const { v4: uuidv4 } = require("uuid");
-const archiver = require("archiver");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-// Use OS temp directory for intermediate files so we don't write into
-// backend's local `downloads/` folder.
-const DOWNLOADS_DIR = process.env.USER_WORK_DIR || path.join(os.tmpdir(), "ytgrab-downloads");
-const USER_DOWNLOADS_DIR = process.env.USER_DOWNLOADS_DIR || path.join(os.homedir(), "Downloads");
-const COOKIES_DIR = path.join(DOWNLOADS_DIR, "cookies");
+const DOWNLOADS_DIR = path.join(__dirname, "downloads");
+const COOKIES_FILE  = path.join(__dirname, "cookies.txt");  // persisted on Render disk
 
-// Ensure downloads (work) directory exists
+// ─── Disk management config ─────────────────────────────────────────────────
+const MAX_DISK_BYTES   = parseInt(process.env.MAX_DISK_MB  || "800")  * 1024 * 1024;
+const FILE_TTL_MS      = parseInt(process.env.FILE_TTL_MIN || "30")   * 60 * 1000;
+const MIN_FREE_BYTES   = parseInt(process.env.MIN_FREE_MB  || "150")  * 1024 * 1024;
+const CLEANUP_INTERVAL = parseInt(process.env.CLEANUP_SEC  || "120")  * 1000;
+
 if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
-if (!fs.existsSync(COOKIES_DIR)) fs.mkdirSync(COOKIES_DIR, { recursive: true });
-try { if (!fs.existsSync(USER_DOWNLOADS_DIR)) fs.mkdirSync(USER_DOWNLOADS_DIR, { recursive: true }); } catch {}
 
-const allowedOrigins = [
-  'http://localhost:5173',
-  'https://ytgrab-by-devesh-raj.onrender.com',
-  'https://yt-grab-by-devesh-raj.vercel.app',
-  'https://yt-grab-by-devesh-raj-git-main-devesh-rajs-projects.vercel.app',
-  process.env.FRONTEND_URL,
-].filter(Boolean);
+// ─── YouTube bypass strategies ───────────────────────────────────────────────
+// Strategy order: proxy → po_token → cookies → plain (best to worst)
 
+const PROXY_URL = process.env.YTDLP_PROXY || "";  // e.g. http://user:pass@host:port
 
-app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error(`Not allowed by CORS: ${origin}`));
-    }
-  },
-  credentials: true,
-}));
+// PO Token is a proof-of-origin token that bypasses bot detection completely.
+// Generate one at: https://github.com/YunzheZJU/youtube-po-token-generator
+// Then set it as YTDLP_PO_TOKEN env var on Render.
+const PO_TOKEN    = process.env.YTDLP_PO_TOKEN    || "";
+const VISITOR_DATA = process.env.YTDLP_VISITOR_DATA || "";
 
-app.use(express.json({ limit: "2mb" }));
-
-
-app.use("/downloads", express.static(DOWNLOADS_DIR));
-
-function sendAttachment(res, filePath, filename) {
-  const rawName = String(filename || "download");
-  // Node's header values must be ASCII-safe; replace non-ASCII characters.
-  const safeAscii = rawName
-    .replace(/"/g, "'")
-    .replace(/\r?\n/g, " ")
-    .replace(/[^\x20-\x7E]/g, "_")
-    .slice(0, 120);
-
-  res.setHeader("Content-Type", "application/octet-stream");
-  // Keep Content-Disposition strictly ASCII-safe to avoid Node header validation crashes.
-  // (This means browser may use a slightly sanitized filename for non-ASCII titles.)
-  res.setHeader("Content-Disposition", `attachment; filename="${safeAscii || "download"}"`);
-
-  const stream = fs.createReadStream(filePath);
-  stream.on("error", () => {
-    if (!res.headersSent) res.status(500).json({ error: "Failed to read file" });
-  });
-  stream.pipe(res);
+function hasCookies() {
+  try { return fs.existsSync(COOKIES_FILE) && fs.statSync(COOKIES_FILE).size > 50; }
+  catch { return false; }
 }
 
-async function copyToUserDownloads(srcPath, preferredName) {
+/** Build yt-dlp args for a given bypass strategy */
+function argsForStrategy(strategy) {
+  const base = [
+    "--no-check-certificates",
+    "--extractor-retries", "5",
+    "--fragment-retries", "5",
+    "--retry-sleep", "exp=1:10",
+    "--no-warnings",
+    "--user-agent",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  ];
+
+  switch (strategy) {
+    case "proxy":
+      return [
+        ...base,
+        "--proxy", PROXY_URL,
+        "--add-headers", "Accept-Language:en-US,en;q=0.9",
+      ];
+
+    case "po_token":
+      return [
+        ...base,
+        "--extractor-args",
+        `youtube:player_client=web;po_token=web+${PO_TOKEN}`,
+        "--extractor-args", `youtube:visitor_data=${VISITOR_DATA}`,
+      ];
+
+    case "cookies":
+      return [
+        ...base,
+        "--cookies", COOKIES_FILE,
+        "--add-headers", "Accept-Language:en-US,en;q=0.9",
+      ];
+
+    case "android":
+      // Use Android client — different player endpoint, harder to block
+      return [
+        ...base,
+        "--extractor-args", "youtube:player_client=android",
+      ];
+
+    case "tv":
+      // YouTube TV/embedded client — often unblocked even on datacenter IPs
+      return [
+        ...base,
+        "--extractor-args", "youtube:player_client=tv_embedded,web",
+      ];
+
+    case "plain":
+    default:
+      return base;
+  }
+}
+
+/** Ordered list of strategies to try */
+function getStrategies() {
+  const strategies = [];
+  if (PROXY_URL)                        strategies.push("proxy");
+  if (PO_TOKEN && VISITOR_DATA)         strategies.push("po_token");
+  if (hasCookies())                     strategies.push("cookies");
+  // Always include client-switching fallbacks — no config needed
+  strategies.push("tv", "android", "plain");
+  return [...new Set(strategies)]; // dedupe
+}
+
+function isBlockedError(stderr) {
+  return /Sign in to confirm|bot|blocked|HTTP Error 429|HTTP Error 403|Precondition check failed|This video is not available/i.test(stderr);
+}
+
+// ─── Disk helpers ───────────────────────────────────────────────────────────
+
+/** Total bytes used inside DOWNLOADS_DIR */
+function getDirBytes() {
   try {
-    if (!srcPath || !preferredName) return;
-    if (!fs.existsSync(srcPath)) return;
-    if (!USER_DOWNLOADS_DIR) return;
+    const files = fs.readdirSync(DOWNLOADS_DIR);
+    return files.reduce((sum, f) => {
+      try { return sum + fs.statSync(path.join(DOWNLOADS_DIR, f)).size; }
+      catch { return sum; }
+    }, 0);
+  } catch { return 0; }
+}
 
-    await fs.promises.mkdir(USER_DOWNLOADS_DIR, { recursive: true });
-
-    const ext = path.extname(preferredName);
-    const base = path.basename(preferredName, ext);
-    let destName = preferredName;
-    let destPath = path.join(USER_DOWNLOADS_DIR, destName);
-
-    // Avoid overwriting existing files.
-    let i = 1;
-    while (fs.existsSync(destPath)) {
-      destName = `${base} (${i})${ext}`;
-      destPath = path.join(USER_DOWNLOADS_DIR, destName);
-      i += 1;
-      if (i > 500) break;
-    }
-
-    await fs.promises.copyFile(srcPath, destPath);
-  } catch (e) {
-    console.warn("Copy to OS Downloads failed:", e?.message || e);
+/** Bytes free on the underlying filesystem (cross-platform) */
+function getFreeBytes() {
+  try {
+    // Linux / macOS: df -Pk <dir> prints 1K-blocks
+    const out = execSync(`df -Pk "${DOWNLOADS_DIR}"`, { timeout: 3000 }).toString();
+    const line = out.split("\n")[1];
+    const available = parseInt(line.trim().split(/\s+/)[3]);
+    return available * 1024;
+  } catch {
+    return Infinity; // can't determine — don't block
   }
 }
 
-function getDisplayFilename(job, storedFilename) {
-  const name = String(storedFilename || "");
-  const jobId = job && job.id ? job.id : null;
-  if (jobId) {
-    const prefix = `${jobId}_`;
-    if (name.startsWith(prefix)) return name.slice(prefix.length);
+/** Delete oldest completed/error files until bytes used < target */
+function evictOldFiles(targetBytes = MAX_DISK_BYTES * 0.7) {
+  // Collect files with mtime
+  let files;
+  try {
+    files = fs.readdirSync(DOWNLOADS_DIR).map(f => {
+      const fp = path.join(DOWNLOADS_DIR, f);
+      try { return { name: f, fp, mtime: fs.statSync(fp).mtimeMs, size: fs.statSync(fp).size }; }
+      catch { return null; }
+    }).filter(Boolean);
+  } catch { return; }
+
+  // Sort oldest first
+  files.sort((a, b) => a.mtime - b.mtime);
+
+  let used = files.reduce((s, f) => s + f.size, 0);
+  let removed = 0;
+  for (const file of files) {
+    if (used <= targetBytes) break;
+    try {
+      fs.unlinkSync(file.fp);
+      used -= file.size;
+      removed++;
+      console.log(`[cleanup] Evicted ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`);
+      // Remove from job store too
+      Object.keys(jobs).forEach(id => {
+        if (jobs[id].filename === file.name) delete jobs[id];
+      });
+    } catch {}
   }
-  return name || "download";
+  if (removed > 0) console.log(`[cleanup] Evicted ${removed} file(s). Dir now ~${(used/1024/1024).toFixed(0)} MB`);
 }
+
+/** True if it's safe to start a new download */
+function hasSufficientSpace() {
+  const dirBytes  = getDirBytes();
+  const freeBytes = getFreeBytes();
+  if (dirBytes  >= MAX_DISK_BYTES) { evictOldFiles(); }
+  if (freeBytes <  MIN_FREE_BYTES) { evictOldFiles(MAX_DISK_BYTES * 0.5); }
+  return getDirBytes() < MAX_DISK_BYTES && getFreeBytes() >= MIN_FREE_BYTES;
+}
+
+app.use(cors());
+app.use(express.json());
+app.use("/downloads", express.static(DOWNLOADS_DIR));
 
 // ─── Format map: our format ID → yt-dlp format string ──────────────────────
 const FORMAT_MAP = {
   "mp4-4k":    { format: "bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/best[height<=2160][ext=mp4]", ext: "mp4" },
-  "mp4-quick": { format: "bestvideo[codec^=avc1][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]", ext: "mp4" },
   "mp4-1080":  { format: "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]", ext: "mp4" },
   "mp4-720":   { format: "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]",  ext: "mp4" },
   "mp4-480":   { format: "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]",  ext: "mp4" },
@@ -127,46 +198,36 @@ const FORMAT_MAP = {
 // ─── In-memory job store ────────────────────────────────────────────────────
 const jobs = {};
 
-// ─── In-memory playlist job store ─────────────────────────────────────────
-const playlistJobs = {}; // playlistJobId -> { id, jobIds, status, progress, zipFilename, error, createdAt }
-let activeCookieSession = null; // { id, filePath, createdAt }
+// ─── Helper: run yt-dlp with automatic strategy fallback ────────────────────
+async function runYtDlp(extraArgs) {
+  const strategies = getStrategies();
+  let lastError = null;
 
-// ─── Helper: run yt-dlp and return a promise ────────────────────────────────
-
-function getActiveCookieFilePath() {
-  if (!activeCookieSession?.filePath) return null;
-  if (!fs.existsSync(activeCookieSession.filePath)) {
-    activeCookieSession = null;
-    return null;
+  for (const strategy of strategies) {
+    const args = [...argsForStrategy(strategy), ...extraArgs];
+    console.log(`[yt-dlp] Trying strategy: ${strategy}`);
+    try {
+      const result = await runYtDlpOnce(args);
+      if (strategy !== strategies[0]) {
+        console.log(`[yt-dlp] Success with strategy: ${strategy}`);
+      }
+      return result;
+    } catch (err) {
+      lastError = err;
+      if (isBlockedError(err.message)) {
+        console.warn(`[yt-dlp] Strategy "${strategy}" blocked — trying next…`);
+        continue; // try next strategy
+      }
+      throw err; // non-block error (bad URL, etc.) — don't retry
+    }
   }
-  return activeCookieSession.filePath;
+
+  // All strategies exhausted
+  const finalErr = new Error("YOUTUBE_BLOCKED:" + (lastError?.message || "All bypass strategies failed"));
+  throw finalErr;
 }
 
-function deleteCookieSession() {
-  const filePath = activeCookieSession?.filePath;
-  activeCookieSession = null;
-  if (!filePath) return;
-
-  try {
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-  } catch (e) {
-    console.warn("Failed to delete cookie session:", e?.message || e);
-  }
-}
-
-function buildYtDlpArgs(baseArgs) {
-  const cookieFile = getActiveCookieFilePath();
-  if (cookieFile) {
-    return ["--cookies", cookieFile, ...baseArgs];
-  }
-  if (process.env.NODE_ENV === "production") {
-    return baseArgs;
-  }
-  const browser = preferredBrowsers()[0];
-  return withBrowserCookies(baseArgs, browser);
-}
-
-function runYtDlp(args) {
+function runYtDlpOnce(args) {
   return new Promise((resolve, reject) => {
     const proc = spawn("yt-dlp", args);
     let stdout = "";
@@ -174,161 +235,55 @@ function runYtDlp(args) {
     proc.stdout.on("data", d => { stdout += d.toString(); });
     proc.stderr.on("data", d => { stderr += d.toString(); });
     proc.on("close", code => {
-      if (code === 0) resolve(stdout.trim());
-      else reject(new Error(stderr || `yt-dlp exited with code ${code}`));
+      if (code === 0) {
+        resolve(stdout.trim());
+      } else {
+        reject(new Error(
+          isBlockedError(stderr) ? "YOUTUBE_BLOCKED:" + stderr : (stderr || `exit ${code}`)
+        ));
+      }
     });
   });
 }
 
-function defaultCookiesFromBrowserArgs() {
-  // Optional "just work like before" mode for local dev:
-  // set YTGRAB_COOKIES_FROM_BROWSER=chrome|firefox|safari|edge|brave|chromium
-  // so yt-dlp can reuse your logged-in browser session.
-  const v = String(process.env.YTGRAB_COOKIES_FROM_BROWSER || "").trim();
-  if (!v) return null;
-  return ["--cookies-from-browser", v];
-}
-
-function preferredBrowsers() {
-  const env = String(process.env.YTGRAB_COOKIES_FROM_BROWSER || "").trim();
-  if (env) return [env];
-
-  // Reasonable defaults for local dev; user can override via env.
-  if (process.platform === "darwin") return ["chrome", "brave", "edge", "firefox", "safari", "chromium"];
-  if (process.platform === "win32") return ["chrome", "edge", "brave", "firefox", "chromium"];
-  return ["chrome", "chromium", "brave", "edge", "firefox"];
-}
-
-function withBrowserCookies(args, browser) {
-  return ["--cookies-from-browser", browser, ...args];
-}
-
-async function runYtDlpForMetadata(baseArgs) {
-  const cookieFile = getActiveCookieFilePath();
-  if (cookieFile) {
-    return runYtDlp(["--cookies", cookieFile, ...baseArgs]);
-  }
-
-  if (process.env.NODE_ENV === "production") {
-    return runYtDlp(baseArgs);
-  }
-
-  return runYtDlpWithBrowserFallback(baseArgs);
-}
-
-async function runYtDlpWithBrowserFallback(baseArgs) {
-  const browsers = preferredBrowsers();
-  let lastErr = null;
-  for (const b of browsers) {
-    try {
-      return await runYtDlp(withBrowserCookies(baseArgs, b));
-    } catch (e) {
-      lastErr = e;
-      const msg = String(e?.message || e || "");
-      // If yt-dlp can't read that browser's cookies, try next. Otherwise stop early.
-      const retryable =
-        /cookies-from-browser/i.test(msg) ||
-        /could not/i.test(msg) ||
-        /not (?:found|installed)/i.test(msg) ||
-        /permission/i.test(msg);
-      if (!retryable) break;
-    }
-  }
-  throw lastErr || new Error("yt-dlp failed");
-}
-
 // ─── GET /api/info?url=... ──────────────────────────────────────────────────
-// Returns video or playlist metadata
 app.get("/api/info", async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).json({ error: "url is required" });
 
   try {
-    const baseArgs = [
+    const raw = await runYtDlp([
       "--dump-json",
       "--flat-playlist",
       "--no-warnings",
       url,
-    ];
-
-    const raw = await runYtDlpForMetadata(baseArgs);
+    ]);
 
     const lines = raw.split("\n").filter(Boolean);
+    const videos = lines.map(line => {
+      try {
+        const v = JSON.parse(line);
+        return {
+          id: v.id,
+          title: v.title || v.fulltitle || "Unknown",
+          channel: v.uploader || v.channel || "Unknown",
+          duration: formatDuration(v.duration),
+          views: formatViews(v.view_count),
+          thumb: v.thumbnail || `https://i.ytimg.com/vi/${v.id}/hqdefault.jpg`,
+          url: v.webpage_url || `https://www.youtube.com/watch?v=${v.id}`,
+        };
+      } catch { return null; }
+    }).filter(Boolean);
 
-    const videos = lines
-      .map((line) => {
-        try {
-          const v = JSON.parse(line);
-          return {
-            id: v.id,
-            title: v.title || v.fulltitle || "Unknown",
-            channel: v.uploader || v.channel || "Unknown",
-            duration: formatDuration(v.duration),
-            views: formatViews(v.view_count),
-            thumb:
-              v.thumbnail || `https://i.ytimg.com/vi/${v.id}/hqdefault.jpg`,
-            url: v.webpage_url || `https://www.youtube.com/watch?v=${v.id}`,
-          };
-        } catch {
-          return null;
-        }
-      })
-      .filter(Boolean);
-
-    return res.json({
-      isPlaylist: videos.length > 1,
-      videos,
-    });
+    const isPlaylist = videos.length > 1;
+    res.json({ isPlaylist, videos });
   } catch (err) {
-    const msg = String(err?.message || err || "");
-    console.error("Info error:", msg);
-    const isBotCheck =
-      /Sign in to confirm you(?:'|’)re not a bot/i.test(msg) ||
-      /Use --cookies-from-browser or --cookies/i.test(msg);
-
-    return res.status(500).json({
-      error: msg,
-      code: isBotCheck ? "BOT_CHECK" : undefined,
-    });
+    console.error("Info error:", err.message);
+    if (err.message.startsWith("YOUTUBE_BLOCKED:")) {
+      return res.status(403).json({ error: "YouTube blocked this request. Paste a valid YouTube cookies.txt export below, then retry.", code: "YOUTUBE_BLOCKED" });
+    }
+    res.status(500).json({ error: err.message });
   }
-});
-
-// ─── POST /api/cookies ─────────────────────────────────────────────────────
-// Body: { cookies: string }
-// Stores a temporary Netscape-format cookies.txt for bot-check recovery.
-app.post("/api/cookies", async (req, res) => {
-  const cookies = String(req.body?.cookies || "").trim();
-  if (!cookies) return res.status(400).json({ error: "cookies text is required" });
-  if (!/\tyoutube\.com\t|\t\.youtube\.com\t|\tgoogle\.com\t|\t\.google\.com\t/i.test(cookies)) {
-    return res.status(400).json({ error: "cookies.txt must include YouTube or Google cookie rows" });
-  }
-
-  const nextId = uuidv4();
-  const filePath = path.join(COOKIES_DIR, `${nextId}.txt`);
-
-  try {
-    await fs.promises.writeFile(filePath, `${cookies}\n`, "utf8");
-    deleteCookieSession();
-    activeCookieSession = {
-      id: nextId,
-      filePath,
-      createdAt: Date.now(),
-    };
-
-    res.json({
-      ok: true,
-      cookieSessionId: nextId,
-      expiresInHours: 12,
-    });
-  } catch (e) {
-    res.status(500).json({ error: `Failed to store cookies: ${String(e?.message || e)}` });
-  }
-});
-
-// ─── DELETE /api/cookies ───────────────────────────────────────────────────
-app.delete("/api/cookies", (_req, res) => {
-  deleteCookieSession();
-  res.json({ ok: true });
 });
 
 // ─── POST /api/download ─────────────────────────────────────────────────────
@@ -338,6 +293,14 @@ app.post("/api/download", (req, res) => {
   const { url, formatId } = req.body;
   if (!url || !formatId) return res.status(400).json({ error: "url and formatId are required" });
 
+  // ── Disk space guard ──
+  if (!hasSufficientSpace()) {
+    return res.status(507).json({
+      error: "Server disk is full. Please try again in a few minutes while old files are cleaned up.",
+      code: "DISK_FULL",
+    });
+  }
+
   const fmtConfig = FORMAT_MAP[formatId];
   if (!fmtConfig) return res.status(400).json({ error: "Invalid formatId" });
 
@@ -345,12 +308,12 @@ app.post("/api/download", (req, res) => {
   const outputTemplate = path.join(DOWNLOADS_DIR, `${jobId}_%(title)s.%(ext)s`);
 
   // Build yt-dlp args
-  const args = buildYtDlpArgs([
-  "--no-playlist",
-  "--merge-output-format", fmtConfig.ext,
-  "-o", outputTemplate,
-  "--newline",
-]);
+  const args = [
+    "--no-playlist",
+    "--merge-output-format", fmtConfig.ext,
+    "-o", outputTemplate,
+    "--newline",  // progress on each line
+  ];
 
   if (fmtConfig.audioOnly) {
     args.push("-x", "--audio-format", fmtConfig.ext);
@@ -369,7 +332,6 @@ app.post("/api/download", (req, res) => {
     url,
     formatId,
     status: "pending",   // pending | downloading | done | error
-    kind: "single",      // single | playlistZip
     progress: 0,
     speed: "",
     eta: "",
@@ -387,105 +349,68 @@ app.post("/api/download", (req, res) => {
 
 function startDownload(job, args) {
   job.status = "downloading";
-  const proc = spawn("yt-dlp", args);
-  let stderrBuf = "";
+  const fullArgs = [...baseYtDlpArgs(), ...args];
+  const proc = spawn("yt-dlp", fullArgs);
 
   proc.stdout.on("data", data => {
     const line = data.toString();
-    // Parse progress lines like: [download]  42.3% of 25.00MiB at 1.20MiB/s ETA 00:18
     const progressMatch = line.match(/\[download\]\s+([\d.]+)%\s+of\s+[\d.]+\S+\s+at\s+([\d.]+\S+)\s+ETA\s+(\S+)/);
     if (progressMatch) {
       job.progress = parseFloat(progressMatch[1]);
       job.speed = progressMatch[2];
       job.eta = progressMatch[3];
     }
-    // Detect destination file
     const destMatch = line.match(/\[(?:download|ExtractAudio|Merger)\] Destination: (.+)/);
-    if (destMatch) job.filename = path.basename(destMatch[1]);
+    if (destMatch) job.filename = path.basename(destMatch[1].trim());
   });
 
   proc.stderr.on("data", data => {
-    const s = data.toString();
-    stderrBuf += s;
-    if (stderrBuf.length > 20000) stderrBuf = stderrBuf.slice(-20000);
-    console.error("yt-dlp stderr:", s);
+    const text = data.toString();
+    console.error("yt-dlp stderr:", text);
+    if (text.includes("Errno 28") || text.includes("No space left on device")) {
+      proc.kill("SIGTERM");
+      job.status = "error";
+      job.error = "Server ran out of disk space. Please retry in a minute.";
+      evictOldFiles(MAX_DISK_BYTES * 0.5);
+      if (job.filename) { try { fs.unlinkSync(path.join(DOWNLOADS_DIR, job.filename)); } catch {} }
+      try { fs.readdirSync(DOWNLOADS_DIR).filter(f => f.startsWith(job.id)).forEach(f => { try { fs.unlinkSync(path.join(DOWNLOADS_DIR, f)); } catch {} }); } catch {}
+    }
+    if (/Sign in to confirm|bot|blocked|HTTP Error 429|HTTP Error 403/i.test(text)) {
+      proc.kill("SIGTERM");
+      job.status = "error";
+      job.error = "YOUTUBE_BLOCKED: YouTube blocked this download. Please add cookies via the Settings panel and retry.";
+    }
   });
 
   proc.on("close", code => {
+    if (job.status === "error") return;
     if (code === 0) {
       job.status = "done";
       job.progress = 100;
-      // Resolve the output file reliably (final filename on disk).
-      job.filename = resolveJobFilename(job);
-
-      // No server-side copy to ~/Downloads.
-      // We rely on the browser download flow (attachment response) so
-      // the user sees only one file with the standard download UI.
+      if (!job.filename) {
+        const files = fs.readdirSync(DOWNLOADS_DIR).filter(f => f.startsWith(job.id));
+        if (files.length > 0) job.filename = files[0];
+      }
     } else {
       job.status = "error";
-      const isBotCheck = /Sign in to confirm you(?:'|’)re not a bot/i.test(stderrBuf) || /Use --cookies-from-browser or --cookies/i.test(stderrBuf);
-      job.error = isBotCheck
-        ? "YouTube blocked this request (bot-check). Upload a cookies.txt export and retry."
-        : (stderrBuf.trim().split("\n").slice(-3).join(" ").trim() || `yt-dlp exited with code ${code}`);
+      job.error = `yt-dlp exited with code ${code}`;
     }
   });
-}
-
-// Resolve the final filename for a finished job.
-// Why: yt-dlp sometimes reports intermediate destinations, but the final file
-// on disk can differ in extension. This verifies existence and falls back to
-// the most recently modified file matching the job id prefix.
-function resolveJobFilename(job) {
-  if (!job || !job.id) return null;
-
-  if (job.filename) {
-    const maybePath = path.join(DOWNLOADS_DIR, job.filename);
-    if (fs.existsSync(maybePath)) return job.filename;
-  }
-
-  const files = fs.readdirSync(DOWNLOADS_DIR)
-    .filter(f => f.startsWith(job.id))
-    .map(f => {
-      const stat = fs.statSync(path.join(DOWNLOADS_DIR, f));
-      return { f, mtimeMs: stat.mtimeMs };
-    })
-    .sort((a, b) => a.mtimeMs - b.mtimeMs);
-
-  if (files.length > 0) return files[files.length - 1].f;
-  return null;
 }
 
 // ─── GET /api/job/:jobId ────────────────────────────────────────────────────
 app.get("/api/job/:jobId", (req, res) => {
   const job = jobs[req.params.jobId];
   if (!job) return res.status(404).json({ error: "Job not found" });
-  const displayName = job.filename ? getDisplayFilename(job, job.filename) : null;
   res.json({
     status: job.status,
     progress: job.progress,
     speed: job.speed,
     eta: job.eta,
-    filename: displayName,
-    downloadUrl: displayName ? `/api/job/${req.params.jobId}/file` : null,
+    filename: job.filename,
+    downloadUrl: job.filename ? `/downloads/${encodeURIComponent(job.filename)}` : null,
     error: job.error,
   });
-});
-
-// ─── GET /api/job/:jobId/file (attachment download) ─────────────────────────
-// Forces a real download in the user's filesystem (prevents "open in new tab").
-app.get("/api/job/:jobId/file", (req, res) => {
-  const job = jobs[req.params.jobId];
-  if (!job) return res.status(404).json({ error: "Job not found" });
-  if (job.status !== "done") return res.status(409).json({ error: "Job not finished yet" });
-
-  const filename = resolveJobFilename(job);
-  if (!filename) return res.status(404).json({ error: "Downloaded file not found" });
-
-  const filePath = path.join(DOWNLOADS_DIR, filename);
-  if (!fs.existsSync(filePath)) return res.status(404).json({ error: "File missing on disk" });
-
-  const displayName = getDisplayFilename(job, filename);
-  sendAttachment(res, filePath, displayName);
 });
 
 // ─── POST /api/download-playlist ───────────────────────────────────────────
@@ -498,16 +423,15 @@ app.post("/api/download-playlist", (req, res) => {
   const fmtConfig = FORMAT_MAP[formatId];
   if (!fmtConfig) return res.status(400).json({ error: "Invalid formatId" });
 
-  const jobIds = urls.map((url, index) => {
+  const jobIds = urls.map(url => {
     const jobId = uuidv4();
     const outputTemplate = path.join(DOWNLOADS_DIR, `${jobId}_%(title)s.%(ext)s`);
-    const args = buildYtDlpArgs([
+    const args = [
       "--no-playlist",
       "--merge-output-format", fmtConfig.ext,
       "-o", outputTemplate,
       "--newline",
-    ]);
-
+    ];
     if (fmtConfig.audioOnly) {
       args.push("-x", "--audio-format", fmtConfig.ext);
       if (fmtConfig.audioBitrate) args.push("--audio-quality", `${fmtConfig.audioBitrate}K`);
@@ -517,203 +441,18 @@ app.post("/api/download-playlist", (req, res) => {
     args.push(url);
 
     const job = {
-      id: jobId,
-      url,
-      formatId,
-      kind: "playlistZip",
-      status: "pending",
-      progress: 0,
-      speed: "",
-      eta: "",
-      filename: null,
-      error: null,
-      createdAt: Date.now(),
+      id: jobId, url, formatId,
+      status: "pending", progress: 0, speed: "", eta: "",
+      filename: null, error: null, createdAt: Date.now(),
     };
     jobs[jobId] = job;
 
-    // Stagger starts slightly to avoid hammering.
-    setTimeout(() => startDownload(job, args), index * 500);
+    // Stagger starts slightly to avoid hammering
+    setTimeout(() => startDownload(job, args), jobIds.indexOf(jobId) * 500);
     return jobId;
   });
 
   res.json({ jobIds });
-});
-
-// ─── POST /api/download-playlist-zip ─────────────────────────────────────────
-// Creates individual jobs for each URL, waits until all are done, then zips them
-// into a single archive for direct download.
-// Body: { urls: string[], formatId }
-// Returns: { playlistJobId, jobIds }
-app.post("/api/download-playlist-zip", (req, res) => {
-  const { urls, formatId } = req.body;
-  if (!Array.isArray(urls) || urls.length === 0) return res.status(400).json({ error: "urls array required" });
-
-  const fmtConfig = FORMAT_MAP[formatId];
-  if (!fmtConfig) return res.status(400).json({ error: "Invalid formatId" });
-
-  const playlistJobId = uuidv4();
-  const jobIds = urls.map((url, index) => {
-    const jobId = uuidv4();
-    const outputTemplate = path.join(DOWNLOADS_DIR, `${jobId}_%(title)s.%(ext)s`);
-    const args = buildYtDlpArgs([
-      "--no-playlist",
-      "--merge-output-format", fmtConfig.ext,
-      "-o", outputTemplate,
-      "--newline",
-    ]);
-
-    if (fmtConfig.audioOnly) {
-      args.push("-x", "--audio-format", fmtConfig.ext);
-      if (fmtConfig.audioBitrate) args.push("--audio-quality", `${fmtConfig.audioBitrate}K`);
-    } else {
-      args.push("-f", fmtConfig.format);
-    }
-
-    args.push(url);
-
-    const job = {
-      id: jobId,
-      url,
-      formatId,
-      kind: "playlistZip",
-      status: "pending",
-      progress: 0,
-      speed: "",
-      eta: "",
-      filename: null,
-      error: null,
-      createdAt: Date.now(),
-    };
-
-    jobs[jobId] = job;
-
-    // Stagger starts slightly to avoid hammering.
-    setTimeout(() => startDownload(job, args), index * 500);
-    return jobId;
-  });
-
-  const playlistJob = {
-    id: playlistJobId,
-    jobIds,
-    status: "pending", // pending | downloading | zipping | done | error
-    progress: 0,
-    zipFilename: null,
-    error: null,
-    createdAt: Date.now(),
-  };
-
-  playlistJobs[playlistJobId] = playlistJob;
-
-  // Wait until all jobs complete, then zip.
-  (function waitAndZip() {
-    const timer = setInterval(async () => {
-      const jobStates = playlistJob.jobIds.map(jid => jobs[jid]);
-      const anyMissing = jobStates.some(j => !j);
-      if (anyMissing) {
-        playlistJob.status = "error";
-        playlistJob.error = "One or more jobs not found in memory.";
-        clearInterval(timer);
-        return;
-      }
-
-      const anyError = jobStates.some(j => j.status === "error");
-      if (anyError) {
-        const errJob = jobStates.find(j => j.status === "error");
-        playlistJob.status = "error";
-        playlistJob.error = errJob?.error || "Playlist download job failed";
-        clearInterval(timer);
-        return;
-      }
-
-      const allDone = jobStates.every(j => j.status === "done");
-      const avgProgress = jobStates.reduce((sum, j) => sum + (j.progress || 0), 0) / jobStates.length;
-      playlistJob.progress = Math.round(avgProgress);
-
-      if (allDone) {
-        clearInterval(timer);
-        playlistJob.status = "zipping";
-        try {
-          const zipFilename = `${playlistJob.id}_playlist.zip`;
-          const zipPath = path.join(DOWNLOADS_DIR, zipFilename);
-
-          // Create zip archive using streaming (archiver).
-          const output = fs.createWriteStream(zipPath);
-          const archive = archiver("zip", { zlib: { level: 9 } });
-          archive.on("warning", err => {
-            // Missing files shouldn't crash the whole operation.
-            if (err?.code !== "ENOENT") console.warn("zip warning:", err);
-          });
-          archive.pipe(output);
-
-          // Add completed files.
-          playlistJob.jobIds.forEach(jid => {
-            const job = jobs[jid];
-            const filename = resolveJobFilename(job);
-            if (!filename) return;
-            const filePath = path.join(DOWNLOADS_DIR, filename);
-            if (fs.existsSync(filePath)) {
-              // Put each file at the root of the zip.
-              const entryName = getDisplayFilename(job, filename);
-              archive.file(filePath, { name: entryName });
-            }
-          });
-
-          await new Promise((resolve, reject) => {
-            output.on("close", resolve);
-            output.on("error", reject);
-            archive.on("error", err => {
-              playlistJob.status = "error";
-              playlistJob.error = String(err?.message || err);
-              reject(err);
-            });
-            archive.finalize().catch(reject);
-          });
-
-          playlistJob.zipFilename = zipFilename;
-          playlistJob.progress = 100;
-          playlistJob.status = "done";
-
-          // No server-side copy to ~/Downloads.
-          // The browser download flow will save the ZIP when requested.
-        } catch (e) {
-          playlistJob.status = "error";
-          playlistJob.error = String(e?.message || e);
-        }
-      } else {
-        // Mark as "downloading" once anything starts.
-        playlistJob.status = "downloading";
-      }
-    }, 1000);
-  })();
-
-  res.json({ playlistJobId, jobIds });
-});
-
-// ─── GET /api/playlist-job/:playlistJobId ───────────────────────────────────
-app.get("/api/playlist-job/:playlistJobId", (req, res) => {
-  const playlistJob = playlistJobs[req.params.playlistJobId];
-  if (!playlistJob) return res.status(404).json({ error: "Playlist job not found" });
-
-  res.json({
-    status: playlistJob.status,
-    progress: playlistJob.progress,
-    zipFilename: playlistJob.zipFilename,
-    downloadUrl: playlistJob.zipFilename ? `/api/playlist-job/${playlistJob.id}/file` : null,
-    error: playlistJob.error,
-  });
-});
-
-// ─── GET /api/playlist-job/:playlistJobId/file (attachment download) ─────
-app.get("/api/playlist-job/:playlistJobId/file", (req, res) => {
-  const playlistJob = playlistJobs[req.params.playlistJobId];
-  if (!playlistJob) return res.status(404).json({ error: "Playlist job not found" });
-  if (playlistJob.status !== "done") return res.status(409).json({ error: "ZIP not ready yet" });
-
-  const filename = playlistJob.zipFilename || `${playlistJob.id}_playlist.zip`;
-  const filePath = path.join(DOWNLOADS_DIR, filename);
-  if (!fs.existsSync(filePath)) return res.status(404).json({ error: "ZIP file missing on disk" });
-
-  sendAttachment(res, filePath, "playlist.zip");
 });
 
 // ─── DELETE /api/job/:jobId ─────────────────────────────────────────────────
@@ -729,95 +468,77 @@ app.delete("/api/job/:jobId", (req, res) => {
   res.json({ deleted: true });
 });
 
-// ─── Auto-cleanup: delete files older than 1 hour ──────────────────────────
-setInterval(() => {
-  const cutoff = Date.now() - 60 * 60 * 1000;
-  const partialCutoff = Date.now() - 12 * 60 * 60 * 1000; // keep last 12h parts
-  const cookiesCutoff = Date.now() - 12 * 60 * 60 * 1000; // keep last 12h cookies
-  const activeJobIds = new Set(
-    Object.values(jobs)
-      .filter(j => j && (j.status === "downloading" || j.status === "pending"))
-      .map(j => j.id)
-  );
-  const activePlaylistJobIds = new Set(
-    Object.values(playlistJobs)
-      .filter(j => j && j.status !== "done" && j.status !== "error")
-      .map(j => j.id)
-  );
+// ─── POST /api/cookies — save cookies.txt from the browser UI ──────────────
+app.post("/api/cookies", (req, res) => {
+  const { cookies } = req.body;
+  if (!cookies || typeof cookies !== "string" || cookies.trim().length < 50) {
+    return res.status(400).json({ error: "Invalid cookies content" });
+  }
+  // Basic Netscape format validation
+  if (!cookies.includes(".youtube.com") && !cookies.includes("youtube")) {
+    return res.status(400).json({ error: "Cookies must be from youtube.com" });
+  }
+  try {
+    fs.writeFileSync(COOKIES_FILE, cookies.trim(), "utf8");
+    console.log("[cookies] Updated cookies.txt —", cookies.trim().split("\n").length, "lines");
+    res.json({ ok: true, lines: cookies.trim().split("\n").length });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to save cookies: " + err.message });
+  }
+});
 
+// ─── GET /api/cookies/status ────────────────────────────────────────────────
+app.get("/api/cookies/status", (req, res) => {
+  res.json({ hasCookies: hasCookies(), path: COOKIES_FILE });
+});
+setInterval(() => {
+  const cutoff = Date.now() - FILE_TTL_MS;
+  let freed = 0;
   Object.entries(jobs).forEach(([id, job]) => {
-    // Don't delete active downloads; only clean up finished jobs.
-    if (job.createdAt < cutoff && (job.status === "done" || job.status === "error")) {
+    if (job.createdAt < cutoff) {
       if (job.filename) {
         const fp = path.join(DOWNLOADS_DIR, job.filename);
-        if (fs.existsSync(fp)) fs.unlinkSync(fp);
+        if (fs.existsSync(fp)) {
+          try {
+            const size = fs.statSync(fp).size;
+            fs.unlinkSync(fp);
+            freed += size;
+          } catch {}
+        }
       }
       delete jobs[id];
     }
   });
+  if (freed > 0) console.log(`[cleanup] TTL removed ${(freed/1024/1024).toFixed(1)} MB`);
 
-  Object.entries(playlistJobs).forEach(([id, pjob]) => {
-    if (pjob.createdAt < cutoff && (pjob.status === "done" || pjob.status === "error")) {
-      if (pjob.zipFilename) {
-        const zp = path.join(DOWNLOADS_DIR, pjob.zipFilename);
-        if (fs.existsSync(zp)) fs.unlinkSync(zp);
-      }
-      delete playlistJobs[id];
+  // Also evict if dir is over limit regardless of TTL
+  if (getDirBytes() > MAX_DISK_BYTES * 0.85) evictOldFiles();
+}, CLEANUP_INTERVAL);
+
+// ─── Health + disk stats ────────────────────────────────────────────────────
+app.get("/api/health", (req, res) => {
+  const dirBytes  = getDirBytes();
+  const freeBytes = getFreeBytes();
+  res.json({
+    ok: true,
+    jobs: Object.keys(jobs).length,
+    disk: {
+      usedByDownloadsMB: Math.round(dirBytes  / 1024 / 1024),
+      freeOnDeviceMB:    freeBytes === Infinity ? "unknown" : Math.round(freeBytes / 1024 / 1024),
+      limitMB:           Math.round(MAX_DISK_BYTES / 1024 / 1024),
+      healthy:           hasSufficientSpace(),
     }
   });
+});
 
-  // Extra safety: remove stale partial downloads if they exist.
-  // This prevents "No space left on device" from repeated failed runs.
-  try {
-    const files = fs.readdirSync(DOWNLOADS_DIR);
-    files.forEach(f => {
-      if (!f.endsWith(".part")) return;
-      if (!activeJobIds.size && !activePlaylistJobIds.size) {
-        // fallthrough
-      } else {
-        for (const jid of activeJobIds) {
-          if (f.startsWith(`${jid}_`)) return;
-        }
-      }
-
-      const full = path.join(DOWNLOADS_DIR, f);
-      const stat = fs.statSync(full);
-      if (stat.mtimeMs < partialCutoff) {
-        fs.unlinkSync(full);
-      }
-    });
-  } catch {}
-
-  // Clean up cookie files (best-effort).
-  try {
-    const activeCookieFile = getActiveCookieFilePath();
-    if (activeCookieSession?.createdAt && activeCookieSession.createdAt < cookiesCutoff) {
-      deleteCookieSession();
-    }
-
-    const files = fs.readdirSync(COOKIES_DIR);
-    files.forEach(f => {
-      const full = path.join(COOKIES_DIR, f);
-      if (activeCookieFile && full === activeCookieFile) return;
-      const stat = fs.statSync(full);
-      if (stat.mtimeMs < cookiesCutoff) fs.unlinkSync(full);
-    });
-  } catch {}
-}, 10 * 60 * 1000);
-
-// ─── Health check ───────────────────────────────────────────────────────────
-app.get("/api/health", (req, res) => res.json({ ok: true, jobs: Object.keys(jobs).length }));
-
-// ─── Error middleware ───────────────────────────────────────────────────────
-app.use((err, _req, res, next) => {
-  if (!err) return next();
-  if (err.type === "entity.too.large") {
-    return res.status(413).json({
-      error: "Payload too large. Keep cookies.txt under 2MB.",
-      code: "PAYLOAD_TOO_LARGE",
-    });
+// ─── Manual purge endpoint (optional: protect with a secret in production) ──
+app.post("/api/admin/purge", (req, res) => {
+  const secret = process.env.ADMIN_SECRET;
+  if (secret && req.headers["x-admin-secret"] !== secret) {
+    return res.status(401).json({ error: "Unauthorized" });
   }
-  return next(err);
+  evictOldFiles(0); // evict everything
+  res.json({ ok: true, remaining: getDirBytes() });
 });
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

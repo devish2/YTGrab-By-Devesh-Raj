@@ -1,18 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
-
-async function apiFetch(path, options = {}) {
-  return fetch(`${API_BASE}${path}`, options);
-}
+const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:5000/api";
 
 const FORMATS = [
-  { id: "mp4-4k",     label: "MP4 4K",            badge: "2160p", type: "video", size: "~2.1 GB" },
-  { id: "mp4-quick", label: "MP4 Quick Player", badge: "COMPAT", type: "video", size: "Best mp4" },
-  { id: "mp4-1080",   label: "MP4 1080p",       badge: "HD",    type: "video", size: "~450 MB" },
-  { id: "mp4-720",    label: "MP4 720p",        badge: "HD",    type: "video", size: "~220 MB" },
-  { id: "mp4-480",    label: "MP4 480p",        badge: "SD",    type: "video", size: "~110 MB" },
-  { id: "mp4-360",    label: "MP4 360p",        badge: "SD",    type: "video", size: "~60 MB"  },
+  { id: "mp4-4k",    label: "MP4 4K",        badge: "2160p", type: "video", size: "~2.1 GB" },
+  { id: "mp4-1080",  label: "MP4 1080p",     badge: "HD",    type: "video", size: "~450 MB" },
+  { id: "mp4-720",   label: "MP4 720p",      badge: "HD",    type: "video", size: "~220 MB" },
+  { id: "mp4-480",   label: "MP4 480p",      badge: "SD",    type: "video", size: "~110 MB" },
+  { id: "mp4-360",   label: "MP4 360p",      badge: "SD",    type: "video", size: "~60 MB"  },
   { id: "webm-1080", label: "WEBM 1080p",    badge: "HD",    type: "video", size: "~380 MB" },
   { id: "webm-720",  label: "WEBM 720p",     badge: "HD",    type: "video", size: "~180 MB" },
   { id: "mp3-320",   label: "MP3 320kbps",   badge: "HQ",    type: "audio", size: "~25 MB"  },
@@ -25,76 +20,69 @@ const FORMATS = [
   { id: "m4a",       label: "M4A 256kbps",   badge: "HQ",    type: "audio", size: "~20 MB"  },
 ];
 
-function formatIdToExtension(formatId) {
-  if (formatId.startsWith("mp4-")) return "mp4";
-  if (formatId.startsWith("webm-")) return "webm";
-  if (formatId.startsWith("mp3-")) return "mp3";
-  if (formatId === "aac") return "aac";
-  if (formatId === "flac") return "flac";
-  if (formatId === "wav") return "wav";
-  if (formatId === "ogg") return "ogg";
-  if (formatId === "m4a") return "m4a";
-  return "download";
-}
+// ── Cookie Panel ─────────────────────────────────────────────────────────────
+function CookiePanel({ onSaved, onDismiss }) {
+  const [text, setText] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState("");
 
-function sanitizeFileName(name) {
-  // Remove characters that are not allowed in macOS filenames.
-  return String(name).replace(/[\/\\:*?"<>|]/g, "_").trim() || "download";
-}
-
-function supportsSaveFilePicker() {
-  return typeof window !== "undefined" && typeof window.showSaveFilePicker === "function";
-}
-
-async function streamToFileHandle(url, fileHandle) {
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`Download failed (${resp.status})`);
-  if (!resp.body) throw new Error("No response body to download.");
-
-  const writable = await fileHandle.createWritable();
-  const reader = resp.body.getReader();
-  let totalBytes = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value) {
-        totalBytes += value.byteLength || 0;
-        await writable.write(value);
-      }
-    }
-  } finally {
-    await writable.close();
+  async function handleSave() {
+    if (!text.trim()) return;
+    setSaving(true); setMsg("");
+    try {
+      const r = await fetch(`${API_BASE}/cookies`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cookies: text }),
+      });
+      const d = await r.json();
+      if (d.ok) { setMsg(`✓ Saved ${d.lines} cookie lines`); setTimeout(onSaved, 800); }
+      else setMsg("✗ " + (d.error || "Failed"));
+    } catch (e) { setMsg("✗ " + e.message); }
+    setSaving(false);
   }
-  return totalBytes;
-}
 
-async function pickSaveHandle({ suggestedName, ext }) {
-  if (!supportsSaveFilePicker()) return null;
-  const name = sanitizeFileName(suggestedName);
-
-  // Best-effort types; browsers may ignore.
-  const types = ext
-    ? [
-        {
-          description: ext.toUpperCase(),
-          accept: { "application/octet-stream": [`.${ext}`] },
-        },
-      ]
-    : undefined;
-
-  try {
-    return await window.showSaveFilePicker({
-      suggestedName: name,
-      ...(types ? { types } : {}),
-    });
-  } catch {
-    return null; // user cancelled
-  }
+  return (
+    <div style={{ background: "#1a0a0a", border: "1px solid #7f1d1d", borderRadius: 10, padding: 18, marginTop: 12 }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: "#fca5a5", marginBottom: 6 }}>
+        YouTube verification required
+      </div>
+      <div style={{ fontSize: 12, color: "#9ca3af", marginBottom: 12, lineHeight: 1.6 }}>
+        Export a Netscape-format <code style={{ color: "#a78bfa" }}>cookies.txt</code> from a logged-in YouTube session, paste it here, and analyze again.
+        <br />
+        <span style={{ color: "#6b7280" }}>
+          Install the <strong style={{ color: "#d1d5db" }}>"Get cookies.txt LOCALLY"</strong> Chrome extension → open youtube.com → click the extension → Export.
+        </span>
+      </div>
+      <textarea
+        value={text}
+        onChange={e => setText(e.target.value)}
+        placeholder={"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t...\tSID\t..."}
+        style={{
+          width: "100%", height: 120, background: "#0a0a0a", border: "1px solid #374151",
+          borderRadius: 6, padding: "10px 12px", fontSize: 11, color: "#9ca3af",
+          fontFamily: "monospace", resize: "vertical",
+        }}
+      />
+      {msg && <div style={{ fontSize: 12, color: msg.startsWith("✓") ? "#34d399" : "#f87171", marginTop: 6 }}>{msg}</div>}
+      <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+        <button onClick={handleSave} disabled={saving} style={{
+          background: "#1d4ed8", color: "#fff", border: "none", borderRadius: 6,
+          padding: "8px 16px", fontSize: 12, fontWeight: 600, cursor: saving ? "not-allowed" : "pointer",
+        }}>
+          {saving ? "Saving…" : "Save cookies and retry"}
+        </button>
+        <button onClick={onDismiss} style={{
+          background: "none", color: "#6b7280", border: "1px solid #374151",
+          borderRadius: 6, padding: "8px 14px", fontSize: 12, cursor: "pointer",
+        }}>Dismiss</button>
+      </div>
+    </div>
+  );
 }
 
 function BadgePill({ label }) {
-  const colors = { "2160p": "#f59e0b", HD: "#3b82f6", SD: "#6b7280", HQ: "#10b981", MAX: "#8b5cf6", COMPAT: "#22c55e" };
+  const colors = { "2160p": "#f59e0b", HD: "#3b82f6", SD: "#6b7280", HQ: "#10b981", MAX: "#8b5cf6" };
   const c = colors[label];
   if (!label || !c) return null;
   return (
@@ -137,7 +125,7 @@ function useJobPoller(jobId, onUpdate, onDone) {
     if (!jobId) return;
     timer.current = setInterval(async () => {
       try {
-        const r = await apiFetch(`/api/job/${jobId}`);
+        const r = await fetch(`${API_BASE}/job/${jobId}`);
         const data = await r.json();
         onUpdate(data);
         if (data.status === "done" || data.status === "error") {
@@ -154,62 +142,31 @@ function VideoCard({ video, checked, onToggle, formatId, fmtLabel }) {
   const [jobId, setJobId] = useState(null);
   const [jobData, setJobData] = useState(null);
   const [starting, setStarting] = useState(false);
-  const [toast, setToast] = useState(null);
-  const fileHandleRef = useRef(null);
-
-  function showToast(title, message) {
-    setToast({ title, message });
-    setTimeout(() => setToast(null), 5000);
-  }
 
   useJobPoller(jobId, setJobData, (d) => {
-      if (d.status === "done") {
-      const handle = fileHandleRef.current;
-      if (handle) {
-        fileHandleRef.current = null;
-        (async () => {
-          try {
-            showToast("Saving file", "Choose location has been selected. Writing to disk…");
-            const bytes = await streamToFileHandle(`${API_BASE}/api/job/${jobId}/file`, handle);
-            if (bytes === 0 && typeof handle.remove === "function") {
-              await handle.remove();
-            }
-            showToast("Downloaded", "Saved to your chosen location.");
-          } catch (e) {
-            if (typeof handle.remove === "function") {
-              try { await handle.remove(); } catch {}
-            }
-            showToast("Download failed", String(e?.message || e));
-          }
-        })();
-      } else {
-        // Fallback: normal browser download to default Downloads folder.
-        window.location.href = `${API_BASE}/api/job/${jobId}/file`;
-      }
+    if (d.status === "done" && d.downloadUrl) {
+      // Auto-trigger browser download
+      const a = document.createElement("a");
+      a.href = `http://localhost:5000${d.downloadUrl}`;
+      a.download = d.filename || "download";
+      a.click();
     }
   });
 
   async function handleDownload() {
     setStarting(true);
     try {
-      // Ask user where to save (if supported).
-      if (supportsSaveFilePicker()) {
-        const ext = formatIdToExtension(formatId);
-        const suggestedName = `${sanitizeFileName(video.title)}.${ext}`;
-        const handle = await pickSaveHandle({ suggestedName, ext });
-        if (!handle) {
-          setStarting(false);
-          return;
-        }
-        fileHandleRef.current = handle;
-      }
-
-      const r = await apiFetch(`/api/download`, {
+      const r = await fetch(`${API_BASE}/download`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: video.url, formatId }),
       });
       const data = await r.json();
+      if (r.status === 507 || data.code === "DISK_FULL") {
+        alert("⚠️ Server disk is full — old files are being cleaned up automatically. Please wait 1–2 minutes and try again.");
+        setStarting(false);
+        return;
+      }
       if (data.jobId) setJobId(data.jobId);
     } catch (e) {
       alert("Download failed: " + e.message);
@@ -229,24 +186,6 @@ function VideoCard({ video, checked, onToggle, formatId, fmtLabel }) {
       border: `1px solid ${checked ? "#1d4ed8" : "#1f2937"}`,
       overflow: "hidden", transition: "border 0.2s",
     }}>
-      {toast && (
-        <div style={{
-          margin: 12,
-          marginBottom: 0,
-          background: "#0b1220",
-          border: `1px solid ${toast.title === "Downloaded" ? "#10b981" : "#ef4444"}`,
-          borderRadius: 10,
-          padding: "10px 12px",
-          textAlign: "left",
-        }}>
-          <div style={{ fontSize: 12, fontWeight: 800, color: toast.title === "Downloaded" ? "#34d399" : "#fca5a5", marginBottom: 4 }}>
-            {toast.title}
-          </div>
-          <div style={{ fontSize: 11, color: "#cbd5e1", lineHeight: 1.35 }}>
-            {toast.message}
-          </div>
-        </div>
-      )}
       <div style={{ display: "flex", gap: 12, padding: 12 }}>
         {onToggle && (
           <input type="checkbox" checked={checked} onChange={onToggle}
@@ -303,36 +242,27 @@ function VideoCard({ video, checked, onToggle, formatId, fmtLabel }) {
 }
 
 // Playlist batch downloader — tracks multiple jobs
-function PlaylistDownloader({ videos, checkedIds, formatId, fmtLabel, trigger, saveFileHandle, onSaveHandleConsumed }) {
+function PlaylistDownloader({ videos, checkedIds, formatId, fmtLabel, trigger }) {
   const [jobMap, setJobMap] = useState({}); // videoId → jobId
   const [jobDataMap, setJobDataMap] = useState({}); // jobId → jobData
-  const [playlistJobId, setPlaylistJobId] = useState(null);
-  const [zipDownloadUrl, setZipDownloadUrl] = useState(null);
-  const [toast, setToast] = useState(null);
-  const isZipOnly = checkedIds.length > 1;
   const pollTimers = useRef({});
-  const zipPollTimer = useRef(null);
   const started = useRef(false);
-  const saveFileHandleRef = useRef(saveFileHandle);
-
-  useEffect(() => {
-    saveFileHandleRef.current = saveFileHandle;
-  }, [saveFileHandle]);
-
-  function showToast(title, message) {
-    setToast({ title, message });
-    setTimeout(() => setToast(null), 6000);
-  }
 
   const pollJob = useCallback((jobId) => {
     if (pollTimers.current[jobId]) return;
     pollTimers.current[jobId] = setInterval(async () => {
       try {
-        const r = await apiFetch(`/api/job/${jobId}`);
+        const r = await fetch(`${API_BASE}/job/${jobId}`);
         const data = await r.json();
         setJobDataMap(prev => ({ ...prev, [jobId]: data }));
         if (data.status === "done" || data.status === "error") {
           clearInterval(pollTimers.current[jobId]);
+          if (data.status === "done" && data.downloadUrl) {
+            const a = document.createElement("a");
+            a.href = `http://localhost:5000${data.downloadUrl}`;
+            a.download = data.filename || "download";
+            a.click();
+          }
         }
       } catch {}
     }, 700);
@@ -341,82 +271,16 @@ function PlaylistDownloader({ videos, checkedIds, formatId, fmtLabel, trigger, s
   useEffect(() => {
     if (!trigger || started.current) return;
     started.current = true;
-    setZipDownloadUrl(null);
     const selectedVideos = videos.filter(v => checkedIds.includes(v.id));
-    const selectedCount = selectedVideos.length;
-    if (selectedCount === 1) {
-      showToast("Starting download", "Downloading 1 file to your system Downloads.");
-      (async () => {
-        try {
-          const r = await apiFetch(`/api/download`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ url: selectedVideos[0].url, formatId }),
-          });
-          const data = await r.json();
-          const jobId = data.jobId;
-          showToast("Download queued", "Please wait until the file is ready...");
-
-          // Poll this single job and trigger a real attachment download.
-          const timer = setInterval(async () => {
-            try {
-              const r2 = await apiFetch(`/api/job/${jobId}`);
-              const d2 = await r2.json();
-              setJobDataMap(prev => ({ ...prev, [jobId]: d2 }));
-              if (d2.status === "done" && d2.filename) {
-                clearInterval(timer);
-                const handle = saveFileHandleRef.current;
-                if (handle) {
-                  saveFileHandleRef.current = null;
-                  (async () => {
-                    try {
-                      showToast("Saving file", "Choose location has been selected. Writing to disk…");
-                      const bytes = await streamToFileHandle(`${API_BASE}/api/job/${jobId}/file`, handle);
-                      if (bytes === 0 && typeof handle.remove === "function") {
-                        await handle.remove();
-                      }
-                      showToast("Saved", "Saved to your chosen location.");
-                    } catch (e) {
-                      if (typeof handle.remove === "function") {
-                        try { await handle.remove(); } catch {}
-                      }
-                      showToast("Download failed", String(e?.message || e));
-                    } finally {
-                      onSaveHandleConsumed?.();
-                    }
-                  })();
-                } else {
-                  window.location.href = `${API_BASE}/api/job/${jobId}/file`;
-                  showToast("Download started", "Saved to your system Downloads.");
-                }
-              }
-              if (d2.status === "error") {
-                clearInterval(timer);
-                showToast("Download failed", d2.error || "Unknown error");
-              }
-            } catch {}
-          }, 700);
-
-          setJobMap({ [selectedVideos[0].id]: jobId });
-        } catch (e) {
-          console.error(e);
-          showToast("Download failed", String(e?.message || e));
-        }
-      })();
-      return;
-    }
-
-    showToast("Starting playlist download", "Downloading playlist as a single ZIP.");
     (async () => {
       try {
-        const r = await apiFetch(`/api/download-playlist-zip`, {
+        const r = await fetch(`${API_BASE}/download-playlist`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ urls: selectedVideos.map(v => v.url), formatId }),
         });
         const data = await r.json();
-        if (data.jobIds && data.playlistJobId) {
-          setPlaylistJobId(data.playlistJobId);
+        if (data.jobIds) {
           const newMap = {};
           selectedVideos.forEach((v, i) => { newMap[v.id] = data.jobIds[i]; });
           setJobMap(newMap);
@@ -427,75 +291,8 @@ function PlaylistDownloader({ videos, checkedIds, formatId, fmtLabel, trigger, s
     return () => Object.values(pollTimers.current).forEach(clearInterval);
   }, [trigger]);
 
-  useEffect(() => {
-    if (!playlistJobId) return;
-    // Poll playlist job until ZIP is ready, then download a single archive.
-    zipPollTimer.current = setInterval(async () => {
-      try {
-        const r = await apiFetch(`/api/playlist-job/${playlistJobId}`);
-        const data = await r.json();
-        if (data.status === "done" && data.downloadUrl) {
-          const handle = saveFileHandleRef.current;
-          const zipUrl = `${API_BASE}/api/playlist-job/${playlistJobId}/file`;
-
-          if (handle) {
-            saveFileHandleRef.current = null;
-            (async () => {
-              try {
-                showToast("Saving playlist ZIP", "Writing ZIP to your chosen location…");
-                const bytes = await streamToFileHandle(zipUrl, handle);
-                if (bytes === 0 && typeof handle.remove === "function") {
-                  await handle.remove();
-                }
-                showToast("ZIP saved", "Saved to your chosen location.");
-              } catch (e) {
-                if (typeof handle.remove === "function") {
-                  try { await handle.remove(); } catch {}
-                }
-                showToast("ZIP download failed", String(e?.message || e));
-              } finally {
-                onSaveHandleConsumed?.();
-              }
-            })();
-          } else {
-            setZipDownloadUrl(zipUrl);
-            showToast("ZIP ready", "Click the download button to save it to your system Downloads.");
-          }
-          clearInterval(zipPollTimer.current);
-        }
-        if (data.status === "error") {
-          clearInterval(zipPollTimer.current);
-        }
-      } catch {}
-    }, 1000);
-
-    return () => clearInterval(zipPollTimer.current);
-  }, [playlistJobId]);
-
   return (
-    <div style={{ position: "relative", display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
-      {toast && (
-        <div style={{
-          position: "fixed",
-          right: 18,
-          bottom: 18,
-          width: 320,
-          zIndex: 50,
-          background: "#0b1220",
-          border: "1px solid #1d4ed8",
-          borderRadius: 12,
-          padding: 14,
-          boxShadow: "0 18px 50px rgba(0,0,0,0.35)",
-          textAlign: "left",
-        }}>
-          <div style={{ fontSize: 13, fontWeight: 800, color: "#93c5fd", marginBottom: 6 }}>
-            {toast.title}
-          </div>
-          <div style={{ fontSize: 12, color: "#cbd5e1", lineHeight: 1.35 }}>
-            {toast.message}
-          </div>
-        </div>
-      )}
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
       {videos.map(video => {
         const jid = jobMap[video.id];
         const jdata = jid ? jobDataMap[jid] : null;
@@ -519,7 +316,7 @@ function PlaylistDownloader({ videos, checkedIds, formatId, fmtLabel, trigger, s
                 <div style={{ fontSize: 11, color: "#6b7280", marginTop: 3 }}>{video.channel}</div>
                 <div style={{ fontSize: 10, color: "#4b5563", marginTop: 4 }}>{video.duration}</div>
               </div>
-              {status === "done" && <span style={{ alignSelf: "center", color: "#34d399", fontSize: 11, fontWeight: 700, flexShrink: 0 }}>{isZipOnly ? "✓ Ready" : "✓ Saved"}</span>}
+              {status === "done" && <span style={{ alignSelf: "center", color: "#34d399", fontSize: 11, fontWeight: 700, flexShrink: 0 }}>✓ Saved</span>}
               {status === "error" && <span style={{ alignSelf: "center", color: "#f87171", fontSize: 11, fontWeight: 700, flexShrink: 0 }}>✗ Error</span>}
               {(status === "pending" || status === "downloading") && (
                 <span style={{ alignSelf: "center", fontSize: 10, color: "#6b7280", flexShrink: 0 }}>
@@ -546,29 +343,6 @@ function PlaylistDownloader({ videos, checkedIds, formatId, fmtLabel, trigger, s
           </div>
         );
       })}
-      {zipDownloadUrl && (
-        <div style={{ marginTop: 8 }}>
-          <button
-            onClick={() => {
-              window.location.href = zipDownloadUrl;
-              showToast("ZIP downloading", "Saved to your system Downloads.");
-            }}
-            style={{
-              width: "100%",
-              padding: 12,
-              borderRadius: 8,
-              border: "none",
-              cursor: "pointer",
-              background: "linear-gradient(135deg,#1d4ed8,#7c3aed)",
-              color: "#fff",
-              fontSize: 14,
-              fontWeight: 700,
-            }}
-          >
-            ↓ Download playlist.zip
-          </button>
-        </div>
-      )}
     </div>
   );
 }
@@ -583,13 +357,9 @@ export default function App() {
   const [videos, setVideos] = useState([]);
   const [singleVideo, setSingleVideo] = useState(null);
   const [error, setError] = useState("");
-  const [botCheckActive, setBotCheckActive] = useState(false);
-  const [cookieText, setCookieText] = useState("");
-  const [cookieSaving, setCookieSaving] = useState(false);
-  const [cookieSessionReady, setCookieSessionReady] = useState(false);
   const [downloadTrigger, setDownloadTrigger] = useState(0);
   const [downloadStarted, setDownloadStarted] = useState(false);
-  const [saveFileHandle, setSaveFileHandle] = useState(null);
+  const [showCookiePanel, setShowCookiePanel] = useState(false);
 
   const fmt = FORMATS.find(f => f.id === selectedFormat);
 
@@ -599,24 +369,18 @@ export default function App() {
     const ytPattern = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+/;
     if (!ytPattern.test(trimmed)) { setError("Please enter a valid YouTube URL."); return; }
     setError(""); setLoading(true); setMode(null); setSingleVideo(null); setVideos([]);
-    setBotCheckActive(false);
-    setDownloadStarted(false);
-    setSaveFileHandle(null);
+    setDownloadStarted(false); setShowCookiePanel(false);
 
     try {
-      const r = await apiFetch(`/api/info?url=${encodeURIComponent(trimmed)}`);
-      let data = null;
-      try {
-        data = await r.json();
-      } catch {
-        data = null;
+      const r = await fetch(`${API_BASE}/info?url=${encodeURIComponent(trimmed)}`);
+      const data = await r.json();
+      if (data.code === "YOUTUBE_BLOCKED") {
+        setError("YouTube blocked this request. Paste a valid YouTube cookies.txt export below, then retry.");
+        setShowCookiePanel(true);
+        setLoading(false);
+        return;
       }
-
-      if (!r.ok) {
-        throw new Error(data?.error || `Request failed with ${r.status}`);
-      }
-
-      if (data?.error) throw new Error(data.error);
+      if (data.error) throw new Error(data.error);
       if (data.isPlaylist) {
         setVideos(data.videos);
         setCheckedVideos(data.videos.map(v => v.id));
@@ -626,65 +390,9 @@ export default function App() {
         setMode("single");
       }
     } catch (e) {
-      const msg = String(e?.message || e);
-      const looksLikeBotCheck =
-        /"code":"BOT_CHECK"/i.test(msg) ||
-        /Sign in to confirm you(?:'|’)re not a bot/i.test(msg) ||
-        /Use --cookies-from-browser or --cookies/i.test(msg) ||
-        /BOT_CHECK/i.test(msg);
-      if (looksLikeBotCheck) {
-        setBotCheckActive(true);
-        setError("YouTube blocked this request. Paste a valid YouTube cookies.txt export below, then retry.");
-      }
-      else setError("Failed to fetch video info: " + msg);
+      setError("Failed to fetch video info: " + e.message);
     }
     setLoading(false);
-  }
-
-  async function handleSaveCookies() {
-    const trimmedCookies = cookieText.trim();
-    if (!trimmedCookies) {
-      setError("Paste the contents of a valid cookies.txt file first.");
-      setBotCheckActive(true);
-      return;
-    }
-
-    setCookieSaving(true);
-    setError("");
-    try {
-      const r = await apiFetch("/api/cookies", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cookies: trimmedCookies }),
-      });
-      const raw = await r.text();
-      let data = null;
-      try {
-        data = raw ? JSON.parse(raw) : null;
-      } catch {
-        data = null;
-      }
-      if (!r.ok) throw new Error(data?.error || raw || `Request failed with ${r.status}`);
-      setCookieSessionReady(true);
-      setBotCheckActive(false);
-      setError("");
-      await handleAnalyze();
-    } catch (e) {
-      setBotCheckActive(true);
-      setCookieSessionReady(false);
-      setError(String(e?.message || e));
-    } finally {
-      setCookieSaving(false);
-    }
-  }
-
-  async function handleClearCookies() {
-    try {
-      await apiFetch("/api/cookies", { method: "DELETE" });
-    } catch {}
-    setCookieText("");
-    setCookieSessionReady(false);
-    setBotCheckActive(false);
   }
 
   const videoFormats = FORMATS.filter(f => f.type === "video");
@@ -738,7 +446,7 @@ export default function App() {
           </label>
           <div style={{ display: "flex", gap: 10 }}>
             <input type="text" value={url}
-              onChange={e => { setUrl(e.target.value); setError(""); setMode(null); setBotCheckActive(false); }}
+              onChange={e => { setUrl(e.target.value); setError(""); setMode(null); }}
               placeholder="https://youtube.com/watch?v=... or playlist URL"
               style={{
                 flex: 1, background: "#0a0f1a", border: "1px solid #1f2937",
@@ -751,101 +459,18 @@ export default function App() {
             </button>
           </div>
           {error && <div style={{ fontSize: 12, color: "#f87171", marginTop: 8 }}>{error}</div>}
+          {showCookiePanel && (
+            <CookiePanel
+              onSaved={() => { setShowCookiePanel(false); setError(""); handleAnalyze(); }}
+              onDismiss={() => setShowCookiePanel(false)}
+            />
+          )}
           {loading && (
             <div style={{ marginTop: 14 }}>
               <div style={{ height: 3, background: "#1f2937", borderRadius: 4, overflow: "hidden" }}>
                 <div style={{ height: "100%", width: "50%", background: "linear-gradient(90deg,#3b82f6,#8b5cf6)", animation: "slide 1.2s infinite ease-in-out", borderRadius: 4 }} />
               </div>
               <div style={{ fontSize: 11, color: "#6b7280", marginTop: 6 }}>Fetching video metadata via yt-dlp…</div>
-            </div>
-          )}
-          {(botCheckActive || cookieSessionReady) && (
-            <div style={{
-              marginTop: 14,
-              padding: 14,
-              borderRadius: 10,
-              border: `1px solid ${cookieSessionReady ? "#065f46" : "#7f1d1d"}`,
-              background: cookieSessionReady ? "#052e16" : "#1f1720",
-            }}>
-              <div style={{
-                fontSize: 12,
-                fontWeight: 700,
-                color: cookieSessionReady ? "#6ee7b7" : "#fca5a5",
-                marginBottom: 6,
-              }}>
-                {cookieSessionReady ? "YouTube cookie session active" : "YouTube verification required"}
-              </div>
-              <div style={{ fontSize: 11, color: "#cbd5e1", lineHeight: 1.5, marginBottom: 10 }}>
-                {cookieSessionReady
-                  ? "This browser session will be reused for metadata and download requests for the next 12 hours, or until you clear it."
-                  : "Export a Netscape-format cookies.txt from a logged-in YouTube session, paste it here, and analyze again."}
-              </div>
-              {!cookieSessionReady && (
-                <textarea
-                  value={cookieText}
-                  onChange={e => setCookieText(e.target.value)}
-                  placeholder={"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t...\tSID\t..."}
-                  style={{
-                    width: "100%",
-                    minHeight: 130,
-                    resize: "vertical",
-                    background: "#0a0f1a",
-                    color: "#f9fafb",
-                    border: "1px solid #374151",
-                    borderRadius: 8,
-                    padding: 12,
-                    fontSize: 12,
-                    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-                    marginBottom: 10,
-                  }}
-                />
-              )}
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                {!cookieSessionReady && (
-                  <button
-                    onClick={handleSaveCookies}
-                    disabled={cookieSaving || loading}
-                    className="analyze-btn"
-                    style={{
-                      padding: "10px 16px",
-                      background: cookieSaving ? "#1f2937" : "linear-gradient(135deg,#2563eb,#7c3aed)",
-                      color: cookieSaving ? "#6b7280" : "#fff",
-                    }}
-                  >
-                    {cookieSaving ? "Saving…" : "Save cookies and retry"}
-                  </button>
-                )}
-                {cookieSessionReady && (
-                  <button
-                    onClick={handleAnalyze}
-                    disabled={loading}
-                    className="analyze-btn"
-                    style={{
-                      padding: "10px 16px",
-                      background: loading ? "#1f2937" : "linear-gradient(135deg,#2563eb,#7c3aed)",
-                      color: loading ? "#6b7280" : "#fff",
-                    }}
-                  >
-                    {loading ? "Analyzing…" : "Retry analyze"}
-                  </button>
-                )}
-                <button
-                  onClick={handleClearCookies}
-                  disabled={cookieSaving || loading}
-                  style={{
-                    padding: "10px 14px",
-                    borderRadius: 8,
-                    border: "1px solid #374151",
-                    background: "transparent",
-                    color: "#cbd5e1",
-                    cursor: "pointer",
-                    fontSize: 12,
-                    fontWeight: 600,
-                  }}
-                >
-                  {cookieSessionReady ? "Clear cookie session" : "Dismiss"}
-                </button>
-              </div>
             </div>
           )}
         </div>
@@ -900,7 +525,7 @@ export default function App() {
                     </span>
                   </div>
                   {!downloadStarted && (
-                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <div style={{ display: "flex", gap: 8 }}>
                       <button onClick={() => setCheckedVideos(videos.map(v => v.id))}
                         style={{ fontSize: 11, color: "#93c5fd", background: "none", border: "none", cursor: "pointer", padding: 0 }}>
                         Select all
@@ -909,45 +534,6 @@ export default function App() {
                       <button onClick={() => setCheckedVideos([])}
                         style={{ fontSize: 11, color: "#6b7280", background: "none", border: "none", cursor: "pointer", padding: 0 }}>
                         None
-                      </button>
-                      <span style={{ color: "#374151" }}>|</span>
-                      <button
-                        onClick={() => {
-                          (async () => {
-                            const allIds = videos.map(v => v.id);
-                            if (allIds.length === 0) return;
-
-                            let suggestedName = "playlist.zip";
-                            let ext = "zip";
-                            if (allIds.length === 1) {
-                              const v = videos[0];
-                              suggestedName = `${sanitizeFileName(v?.title || "download")}.${formatIdToExtension(selectedFormat)}`;
-                              ext = formatIdToExtension(selectedFormat);
-                            }
-
-                            const handle = await pickSaveHandle({ suggestedName, ext });
-                            if (!handle && supportsSaveFilePicker()) return; // user cancelled
-
-                            setSaveFileHandle(handle);
-                            setCheckedVideos(allIds);
-                            setDownloadStarted(true);
-                            setDownloadTrigger(t => t + 1);
-                          })();
-                        }}
-                        disabled={videos.length === 0}
-                        style={{
-                          fontSize: 11,
-                          color: "#fff",
-                          background: "linear-gradient(135deg,#1d4ed8,#7c3aed)",
-                          border: "none",
-                          cursor: "pointer",
-                          padding: "6px 10px",
-                          borderRadius: 8,
-                          fontWeight: 700,
-                        }}
-                        title="Download entire playlist"
-                      >
-                        ↓ Download playlist
                       </button>
                     </div>
                   )}
@@ -981,27 +567,7 @@ export default function App() {
                       ))}
                     </div>
                     <button
-                      onClick={() => {
-                        (async () => {
-                          const selectedCount = checkedVideos.length;
-                          if (selectedCount === 0) return;
-
-                          let suggestedName = "playlist.zip";
-                          let ext = "zip";
-                          if (selectedCount === 1) {
-                            const v = videos.find(x => x.id === checkedVideos[0]);
-                            suggestedName = `${sanitizeFileName(v?.title || "download")}.${formatIdToExtension(selectedFormat)}`;
-                            ext = formatIdToExtension(selectedFormat);
-                          }
-
-                          const handle = await pickSaveHandle({ suggestedName, ext });
-                          if (!handle && supportsSaveFilePicker()) return; // user cancelled
-
-                          setSaveFileHandle(handle);
-                          setDownloadStarted(true);
-                          setDownloadTrigger(t => t + 1);
-                        })();
-                      }}
+                      onClick={() => { setDownloadStarted(true); setDownloadTrigger(t => t + 1); }}
                       disabled={checkedVideos.length === 0}
                       style={{
                         width: "100%", padding: 12, borderRadius: 8, border: "none",
@@ -1010,7 +576,7 @@ export default function App() {
                         color: checkedVideos.length === 0 ? "#4b5563" : "#fff",
                         fontSize: 14, fontWeight: 700,
                       }}>
-                      ↓ Download playlist ZIP ({checkedVideos.length} items)
+                      ↓ Download {checkedVideos.length} video{checkedVideos.length !== 1 ? "s" : ""} as {fmt?.label}
                     </button>
                   </>
                 ) : (
@@ -1020,8 +586,6 @@ export default function App() {
                     formatId={selectedFormat}
                     fmtLabel={fmt?.label}
                     trigger={downloadTrigger}
-                    saveFileHandle={saveFileHandle}
-                    onSaveHandleConsumed={() => setSaveFileHandle(null)}
                   />
                 )}
               </div>
@@ -1048,10 +612,6 @@ export default function App() {
         <div style={{ textAlign: "center", marginTop: 24, fontSize: 10, color: "#374151" }}>
           For personal use only · Respect copyright and YouTube's Terms of Service
         </div>
-        <h2 style={{ textAlign: "center", marginTop: 24, fontSize: 14, color: "#374151", fontWeight: 600 }}>
-          Made with ❤️ in India 🇮🇳 by Devesh Raj
-        </h2>
-
       </div>
     </div>
   );
