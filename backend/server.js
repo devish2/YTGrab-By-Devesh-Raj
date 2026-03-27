@@ -18,7 +18,24 @@ const USER_DOWNLOADS_DIR = process.env.USER_DOWNLOADS_DIR || path.join(os.homedi
 if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
 try { if (!fs.existsSync(USER_DOWNLOADS_DIR)) fs.mkdirSync(USER_DOWNLOADS_DIR, { recursive: true }); } catch {}
 
-app.use(cors());
+const allowedOrigins = [
+  'http://localhost:5173',
+  'https://yt-grab-by-devesh-raj.vercel.app',
+  'https://ytgrab-by-devesh-raj.onrender.com',
+  process.env.FRONTEND_URL,
+].filter(Boolean);
+
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+}));
+
 app.use(express.json());
 app.use("/downloads", express.static(DOWNLOADS_DIR));
 
