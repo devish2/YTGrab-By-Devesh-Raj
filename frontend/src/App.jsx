@@ -226,10 +226,16 @@ function VideoCard({ video, checked, onToggle, formatId, fmtLabel }) {
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4 }}>
             <span style={{ fontSize: 10, color: "#6b7280" }}>
-              {fmtLabel} — {Math.floor(progress)}%
+              {fmtLabel}
+              {jobData?.strategy && jobData.strategy !== "plain" && (
+                <span style={{ marginLeft: 6, color: "#a78bfa" }}>· {jobData.strategy}</span>
+              )}
+              {progress === 0 && " · connecting…"}
             </span>
             <span style={{ fontSize: 10, color: "#6b7280" }}>
-              {jobData?.speed && `${jobData.speed}`}{jobData?.eta && ` · ETA ${jobData.eta}`}
+              {progress > 0 ? `${Math.floor(progress)}%` : ""}
+              {jobData?.speed && ` · ${jobData.speed}`}
+              {jobData?.eta && ` · ETA ${jobData.eta}`}
             </span>
           </div>
         </div>

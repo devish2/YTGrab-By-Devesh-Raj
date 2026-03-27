@@ -349,16 +349,32 @@ app.post("/api/download", (req, res) => {
 
 function startDownload(job, args) {
   job.status = "downloading";
-  const fullArgs = [...baseYtDlpArgs(), ...args];
+  const strategies = getStrategies();
+  tryDownloadWithStrategies(job, args, strategies, 0);
+}
+
+function tryDownloadWithStrategies(job, extraArgs, strategies, idx) {
+  if (idx >= strategies.length) {
+    job.status = "error";
+    job.error = "YouTube blocked this download. All bypass strategies exhausted. Try again later or set up a proxy.";
+    return;
+  }
+
+  const strategy = strategies[idx];
+  job.strategy = strategy;  // visible via /api/job/:id
+  const fullArgs = [...argsForStrategy(strategy), ...extraArgs];
+  console.log(`[download] Job ${job.id} — strategy: ${strategy}`);
+
   const proc = spawn("yt-dlp", fullArgs);
+  let stderrBuf = "";
 
   proc.stdout.on("data", data => {
     const line = data.toString();
     const progressMatch = line.match(/\[download\]\s+([\d.]+)%\s+of\s+[\d.]+\S+\s+at\s+([\d.]+\S+)\s+ETA\s+(\S+)/);
     if (progressMatch) {
       job.progress = parseFloat(progressMatch[1]);
-      job.speed = progressMatch[2];
-      job.eta = progressMatch[3];
+      job.speed    = progressMatch[2];
+      job.eta      = progressMatch[3];
     }
     const destMatch = line.match(/\[(?:download|ExtractAudio|Merger)\] Destination: (.+)/);
     if (destMatch) job.filename = path.basename(destMatch[1].trim());
@@ -366,35 +382,43 @@ function startDownload(job, args) {
 
   proc.stderr.on("data", data => {
     const text = data.toString();
-    console.error("yt-dlp stderr:", text);
+    stderrBuf += text;
+    console.error(`[yt-dlp/${strategy}]`, text.trim());
+
     if (text.includes("Errno 28") || text.includes("No space left on device")) {
       proc.kill("SIGTERM");
       job.status = "error";
       job.error = "Server ran out of disk space. Please retry in a minute.";
       evictOldFiles(MAX_DISK_BYTES * 0.5);
-      if (job.filename) { try { fs.unlinkSync(path.join(DOWNLOADS_DIR, job.filename)); } catch {} }
       try { fs.readdirSync(DOWNLOADS_DIR).filter(f => f.startsWith(job.id)).forEach(f => { try { fs.unlinkSync(path.join(DOWNLOADS_DIR, f)); } catch {} }); } catch {}
-    }
-    if (/Sign in to confirm|bot|blocked|HTTP Error 429|HTTP Error 403/i.test(text)) {
-      proc.kill("SIGTERM");
-      job.status = "error";
-      job.error = "YOUTUBE_BLOCKED: YouTube blocked this download. Please add cookies via the Settings panel and retry.";
     }
   });
 
   proc.on("close", code => {
-    if (job.status === "error") return;
+    if (job.status === "error") return; // disk-full already handled
+
     if (code === 0) {
-      job.status = "done";
+      job.status   = "done";
       job.progress = 100;
       if (!job.filename) {
         const files = fs.readdirSync(DOWNLOADS_DIR).filter(f => f.startsWith(job.id));
         if (files.length > 0) job.filename = files[0];
       }
-    } else {
-      job.status = "error";
-      job.error = `yt-dlp exited with code ${code}`;
+      return;
     }
+
+    // Bot block — try next strategy
+    if (isBlockedError(stderrBuf)) {
+      console.warn(`[download] Strategy "${strategy}" blocked — trying next (${idx + 1}/${strategies.length})`);
+      // clean partial files before retry
+      try { fs.readdirSync(DOWNLOADS_DIR).filter(f => f.startsWith(job.id)).forEach(f => { try { fs.unlinkSync(path.join(DOWNLOADS_DIR, f)); } catch {} }); } catch {}
+      job.filename = null;
+      tryDownloadWithStrategies(job, extraArgs, strategies, idx + 1);
+      return;
+    }
+
+    job.status = "error";
+    job.error  = stderrBuf.slice(-300) || `yt-dlp exited with code ${code}`;
   });
 }
 
@@ -410,6 +434,7 @@ app.get("/api/job/:jobId", (req, res) => {
     filename: job.filename,
     downloadUrl: job.filename ? `/downloads/${encodeURIComponent(job.filename)}` : null,
     error: job.error,
+    strategy: job.strategy || null,
   });
 });
 
