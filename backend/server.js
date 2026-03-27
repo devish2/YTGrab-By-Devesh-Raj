@@ -40,7 +40,7 @@ app.use(cors({
   credentials: true,
 }));
 
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
 
 
 app.use("/downloads", express.static(DOWNLOADS_DIR));
@@ -282,9 +282,13 @@ app.get("/api/info", async (req, res) => {
   } catch (err) {
     const msg = String(err?.message || err || "");
     console.error("Info error:", msg);
+    const isBotCheck =
+      /Sign in to confirm you(?:'|’)re not a bot/i.test(msg) ||
+      /Use --cookies-from-browser or --cookies/i.test(msg);
 
     return res.status(500).json({
       error: msg,
+      code: isBotCheck ? "BOT_CHECK" : undefined,
     });
   }
 });
@@ -803,6 +807,18 @@ setInterval(() => {
 
 // ─── Health check ───────────────────────────────────────────────────────────
 app.get("/api/health", (req, res) => res.json({ ok: true, jobs: Object.keys(jobs).length }));
+
+// ─── Error middleware ───────────────────────────────────────────────────────
+app.use((err, _req, res, next) => {
+  if (!err) return next();
+  if (err.type === "entity.too.large") {
+    return res.status(413).json({
+      error: "Payload too large. Keep cookies.txt under 2MB.",
+      code: "PAYLOAD_TOO_LARGE",
+    });
+  }
+  return next(err);
+});
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 function formatDuration(seconds) {
