@@ -137,7 +137,7 @@ function useJobPoller(jobId, onUpdate, onDone) {
     if (!jobId) return;
     timer.current = setInterval(async () => {
       try {
-        const r = await apiFetch(`/job/${jobId}`);
+        const r = await apiFetch(`/api/job/${jobId}`);
         const data = await r.json();
         onUpdate(data);
         if (data.status === "done" || data.status === "error") {
@@ -197,7 +197,7 @@ function VideoCard({ video, checked, onToggle, formatId, fmtLabel }) {
         fileHandleRef.current = handle;
       }
 
-      const r = await apiFetch(`/download`, {
+      const r = await apiFetch(`/api/download`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: video.url, formatId }),
@@ -321,7 +321,7 @@ function PlaylistDownloader({ videos, checkedIds, formatId, fmtLabel, trigger, s
     if (pollTimers.current[jobId]) return;
     pollTimers.current[jobId] = setInterval(async () => {
       try {
-        const r = await apiFetch(`/job/${jobId}`);
+        const r = await apiFetch(`/api/job/${jobId}`);
         const data = await r.json();
         setJobDataMap(prev => ({ ...prev, [jobId]: data }));
         if (data.status === "done" || data.status === "error") {
@@ -341,7 +341,7 @@ function PlaylistDownloader({ videos, checkedIds, formatId, fmtLabel, trigger, s
       showToast("Starting download", "Downloading 1 file to your system Downloads.");
       (async () => {
         try {
-          const r = await apiFetch(`/download`, {
+          const r = await apiFetch(`/api/download`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ url: selectedVideos[0].url, formatId }),
@@ -353,7 +353,7 @@ function PlaylistDownloader({ videos, checkedIds, formatId, fmtLabel, trigger, s
           // Poll this single job and trigger a real attachment download.
           const timer = setInterval(async () => {
             try {
-              const r2 = await apiFetch(`/job/${jobId}`);
+              const r2 = await apiFetch(`/api/job/${jobId}`);
               const d2 = await r2.json();
               setJobDataMap(prev => ({ ...prev, [jobId]: d2 }));
               if (d2.status === "done" && d2.filename) {
@@ -402,7 +402,7 @@ function PlaylistDownloader({ videos, checkedIds, formatId, fmtLabel, trigger, s
     showToast("Starting playlist download", "Downloading playlist as a single ZIP.");
     (async () => {
       try {
-        const r = await apiFetch(`/download-playlist-zip`, {
+        const r = await apiFetch(`/api/download-playlist-zip`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ urls: selectedVideos.map(v => v.url), formatId }),
@@ -425,7 +425,7 @@ function PlaylistDownloader({ videos, checkedIds, formatId, fmtLabel, trigger, s
     // Poll playlist job until ZIP is ready, then download a single archive.
     zipPollTimer.current = setInterval(async () => {
       try {
-        const r = await apiFetch(`/playlist-job/${playlistJobId}`);
+        const r = await apiFetch(`/api/playlist-job/${playlistJobId}`);
         const data = await r.json();
         if (data.status === "done" && data.downloadUrl) {
           const handle = saveFileHandleRef.current;
