@@ -20,8 +20,9 @@ try { if (!fs.existsSync(USER_DOWNLOADS_DIR)) fs.mkdirSync(USER_DOWNLOADS_DIR, {
 
 const allowedOrigins = [
   'http://localhost:5173',
-  'https://yt-grab-by-devesh-raj.vercel.app',
   'https://ytgrab-by-devesh-raj.onrender.com',
+  'https://yt-grab-by-devesh-raj.vercel.app',
+  'https://yt-grab-by-devesh-raj-git-main-devesh-rajs-projects.vercel.app',
   process.env.FRONTEND_URL,
 ].filter(Boolean);
 
@@ -30,7 +31,7 @@ app.use(cors({
     if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
-      callback(new Error('Not allowed by CORS'));
+      callback(new Error(`Not allowed by CORS: ${origin}`));
     }
   },
   credentials: true,

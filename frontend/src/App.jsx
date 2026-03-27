@@ -592,10 +592,15 @@ export default function App() {
     setSaveFileHandle(null);
 
     try {
-      const r = await apiFetch(`/info?url=${encodeURIComponent(trimmed)}`);
-      const data = await r.json();
-      if (data.error) throw new Error(data.error);
-      if (data.isPlaylist) {
+      const r = await apiFetch(`/api/info?url=${encodeURIComponent(trimmed)}`);
+
+if (!r.ok) {
+  const text = await r.text();
+  throw new Error(text || `Request failed with ${r.status}`);
+}
+
+const data = await r.json();
+if (data.error) throw new Error(data.error);      if (data.isPlaylist) {
         setVideos(data.videos);
         setCheckedVideos(data.videos.map(v => v.id));
         setMode("playlist");
