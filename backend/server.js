@@ -37,6 +37,7 @@ app.use(cors({
 }));
 
 app.use(express.json());
+
 app.use("/downloads", express.static(DOWNLOADS_DIR));
 
 function sendAttachment(res, filePath, filename) {
